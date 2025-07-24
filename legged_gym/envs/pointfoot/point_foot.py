@@ -338,6 +338,18 @@ class PointFoot:
         return buf
 
     def _compose_proprioceptive_obs_buf_no_height_measure(self):
+        '''
+        This function is used to compose the proprioceptive observations.
+        Now it includes:
+        - base angular velocity
+        - projected gravity
+        - DOF position (relative to default position)
+        - DOF velocity
+        - actions (scaled actions)
+        - commands (scaled commands)
+
+        You can add more observations here if needed.
+        '''
         self.proprioceptive_obs_buf = torch.cat((self.base_ang_vel * self.obs_scales.ang_vel,
                                                  self.projected_gravity,
                                                  (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
@@ -348,6 +360,8 @@ class PointFoot:
 
     def create_sim(self):
         """ Creates simulation, terrain and environments
+        You can modify this function to add your own terrain and environment settings.
+        For example, you can add a custom terrain mixed with heightfield and trimesh.
         """
         self.up_axis_idx = 2  # 2 for z, 1 for y -> adapt gravity accordingly
         self.sim = self.gym.create_sim(self.sim_device_id, self.graphics_device_id, self.physics_engine,
@@ -1096,11 +1110,6 @@ class PointFoot:
         # Penalize xy axes base angular velocity
         return torch.sum(torch.square(self.base_ang_vel[:, :2]), dim=1)
 
-    def _reward_base_height(self):
-        # Penalize base height away from target
-        base_height = torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
-        return torch.square(base_height - self.cfg.rewards.base_height_target)
-
     def _reward_torques(self):
         # Penalize torques
         return torch.sum(torch.square(self.torques), dim=1)
@@ -1148,3 +1157,43 @@ class PointFoot:
 
     def _reward_survival(self):
         return (~self.reset_buf).float()
+
+    # ------- TODO: add reward function for velocity tracking task -------
+    '''
+    After adding the reward functions you need in this file, you need to add the corresponding reward scales in the config file.
+    For example, if you want to add a reward function for linear velocity tracking, you need to add the following to the config file:
+    
+    rewards:
+      scales:
+        tracking_lin_vel: 1.0
+        tracking_ang_vel: 1.0
+        base_height: 1.0
+        tracking_base_height: 1.0
+        orientation: 1.0
+
+    '''
+    # 1. linear velocity tracking
+    def _reward_tracking_lin_vel(self):
+        # Tracking the linear velocity command
+        pass
+
+    # 2. angular velocity tracking
+    def _reward_tracking_ang_vel(self):
+        # Tracking the angular velocity command
+        pass
+    
+    # 3. base height tracking (typically, the target base height is set as a constant)
+    def _reward_base_height(self):
+        # Penalize base height away from target
+        base_height = torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
+        return torch.square(base_height - self.cfg.rewards.base_height_target)
+
+    # but you can also treat the base height as a control target (by adding the base height to the commands)
+    def _reward_tracking_base_height(self):
+        # Tracking the base height command
+        pass
+
+    # 4. flat orientation
+    def _reward_orientation(self):
+        # Penalize non flat base orientation
+        pass

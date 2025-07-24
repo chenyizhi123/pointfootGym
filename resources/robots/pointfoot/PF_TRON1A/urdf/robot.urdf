@@ -61,7 +61,7 @@
                     rpy="0 0 0"/>
             <geometry>
                 <mesh
-                        filename="../meshes/base_Link.STL"/>
+                        filename="meshes/base_Link.STL"/>
             </geometry>
             <material
                     name="">
@@ -118,7 +118,7 @@
                     rpy="0 0 0"/>
             <geometry>
                 <mesh
-                        filename="../meshes/abad_L_Link.STL"/>
+                        filename="meshes/abad_L_Link.STL"/>
             </geometry>
             <material
                     name="">
@@ -161,7 +161,7 @@
                     rpy="0 0 0"/>
             <geometry>
                 <mesh
-                        filename="../meshes/hip_L_Link.STL"/>
+                        filename="meshes/hip_L_Link.STL"/>
             </geometry>
             <material
                     name="">
@@ -204,7 +204,7 @@
                     rpy="0 0 0"/>
             <geometry>
                 <mesh
-                        filename="../meshes/knee_L_Link.STL"/>
+                        filename="meshes/knee_L_Link.STL"/>
             </geometry>
             <material
                     name="">
@@ -247,7 +247,7 @@
                     rpy="0 0 0"/>
             <geometry>
                 <mesh
-                        filename="../meshes/foot_L_Link.STL"/>
+                        filename="meshes/foot_L_Link.STL"/>
             </geometry>
             <material
                     name="">
@@ -360,7 +360,7 @@
                     rpy="0 0 0"/>
             <geometry>
                 <mesh
-                        filename="../meshes/abad_R_Link.STL"/>
+                        filename="meshes/abad_R_Link.STL"/>
             </geometry>
             <material
                     name="">
@@ -403,7 +403,7 @@
                     rpy="0 0 0"/>
             <geometry>
                 <mesh
-                        filename="../meshes/hip_R_Link.STL"/>
+                        filename="meshes/hip_R_Link.STL"/>
             </geometry>
             <material
                     name="">
@@ -446,7 +446,7 @@
                     rpy="0 0 0"/>
             <geometry>
                 <mesh
-                        filename="../meshes/knee_R_Link.STL"/>
+                        filename="meshes/knee_R_Link.STL"/>
             </geometry>
             <material
                     name="">
@@ -489,7 +489,7 @@
                     rpy="0 0 0"/>
             <geometry>
                 <mesh
-                        filename="../meshes/foot_R_Link.STL"/>
+                        filename="meshes/foot_R_Link.STL"/>
             </geometry>
             <material
                     name="">

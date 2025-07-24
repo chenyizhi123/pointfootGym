@@ -1,10 +1,15 @@
-# Pointfoot-Gym-Template
+# Pointfoot-Gym-Tron-Camp
 
 This repository provides a template for training point-foot legged robots, built upon Isaac Gym and LeggedGym framework.
 
-**Maintainers:** Haokai Su, Jiaqi Song  
-**Affiliation:** CLEAR Lab, SUSTech  
+This code package contains the following components:
 
+- `legged_gym`: Trainin code for robots.
+- `pointfootMujoco/rl_controller.py`: Deployment code for RL policy.
+- `pointfootMujoco/simulator.py`: Mujoco simulation code for the robot.
+
+The following instructions are for the Tron-Camp participants who are not using the GradMotion platform.
+If you are using the GradMotion platform, please refer to the instructions in the platform.
 ---
 
 ### Installation
@@ -12,13 +17,14 @@ This repository provides a template for training point-foot legged robots, built
 1. Activate conda env
    - `conda activate pointfoot_legged_gym`
 2. Install Isaac Gym
-   - `cd ~/ACR/isaacgym/python && pip install -e .`
+   - `mkdir -p ~/Tron-Camp`
+   - `cd ~/Tron-Camp/isaacgym/python && pip install -e .`
    - Try running an example `cd examples && python 1080_balls_of_solitude.py`
 3. Install rsl_rl (PPO implementation)
-   -  `cd ~/ACR/rsl_rl && git checkout v1.0.2 && pip install -e .` 
+   -  `cd ~/Tron-Camp/rsl_rl && git checkout v1.0.2 && pip install -e .` 
 4. Install pointfoot-Gym
-    - Clone this repository in `~/ACR`
-   - `cd ~/ACR/pointfootGym && pip install -e .`
+    - Clone this repository in `~/Tron-Camp`
+   - `cd ~/Tron-Camp/pointfootGym && pip install -e .`
 
 ### Project Structure
 1. Environment Configuration
@@ -80,7 +86,7 @@ pip install mujoco
 
 3. Install Low-level Controller
 ```bash
-cd ~/ACR/pointfootGym/pointfootMujoco
+cd ~/Tron-Camp/pointfootMujoco
 pip install pointfoot-sdk-lowlevel/python3/amd64/limxsdk-*-py3-none-any.whl
 ```
 
