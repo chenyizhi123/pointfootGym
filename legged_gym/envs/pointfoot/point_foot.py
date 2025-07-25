@@ -1233,7 +1233,7 @@ class PointFoot:
     # 3. base height tracking (typically, the target base height is set as a constant)
     def _reward_base_height(self):
         # Penalize base height away from target
-        base_height = self.root_states[:, 2] - self.measured_heights
+        base_height = torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1) 
         return torch.square(base_height - self.cfg.rewards.base_height_target)
 
     # but you can also treat the base height as a control target (by adding the base height to the commands)
