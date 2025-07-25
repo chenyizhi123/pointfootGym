@@ -171,12 +171,20 @@ class PointFoot:
 
         self.episode_length_buf += 1
         self.common_step_counter += 1
+        
+        # Update gait process (following t1.py design)
+        self.gait_process[:] = torch.fmod(self.gait_process + self.dt * self.gait_frequency, 1.0)
 
         # prepare quantities
         self.base_quat[:] = self.root_states[:, 3:7]
         self.base_lin_vel[:] = quat_rotate_inverse(self.base_quat, self.root_states[:, 7:10])
         self.base_ang_vel[:] = quat_rotate_inverse(self.base_quat, self.root_states[:, 10:13])
         self.projected_gravity[:] = quat_rotate_inverse(self.base_quat, self.gravity_vec)
+        
+        # Update filtered velocities using exponential moving average for stable rewards (currently disabled)
+        # filter_weight = getattr(self.cfg.normalization, 'filter_weight', 0.05)  # Default 0.05 if not specified
+        # self.filtered_lin_vel[:] = self.base_lin_vel[:] * filter_weight + self.filtered_lin_vel[:] * (1.0 - filter_weight)
+        # self.filtered_ang_vel[:] = self.base_ang_vel[:] * filter_weight + self.filtered_ang_vel[:] * (1.0 - filter_weight)
         if self.cfg.terrain.measure_heights_actor or self.cfg.terrain.measure_heights_critic:
             self.measured_heights = self._get_heights()
         self._compute_feet_states()
@@ -263,6 +271,8 @@ class PointFoot:
         self.last_max_feet_height[env_ids] = 0.
         self.episode_length_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
+        # Reset gait variables for new episodes
+        self.gait_process[env_ids] = 0.0
 
     def compute_reward(self):
         """ Compute rewards
@@ -340,23 +350,37 @@ class PointFoot:
     def _compose_proprioceptive_obs_buf_no_height_measure(self):
         '''
         This function is used to compose the proprioceptive observations.
-        Now it includes:
-        - base angular velocity
+        Following t1.py design with gait information:
         - projected gravity
+        - base angular velocity  
+        - commands (scaled)
+        - gait phase (cos/sin)
         - DOF position (relative to default position)
         - DOF velocity
-        - actions (scaled actions)
-        - commands (scaled commands)
-
-        You can add more observations here if needed.
+        - actions (current actions only, no history needed)
         '''
-        self.proprioceptive_obs_buf = torch.cat((self.base_ang_vel * self.obs_scales.ang_vel,
-                                                 self.projected_gravity,
-                                                 (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
-                                                 self.dof_vel * self.obs_scales.dof_vel,
-                                                 self.actions,
-                                                 self.commands[:, :3] * self.commands_scale,
-                                                 ), dim=-1)
+        # Commands scaling
+        commands_scale = torch.tensor([
+            self.obs_scales.lin_vel, 
+            self.obs_scales.lin_vel, 
+            self.obs_scales.ang_vel
+        ], device=self.device, requires_grad=False)
+        
+        # Gait phase information (like t1.py)
+        # Using real gait variables now
+        gait_cos = (torch.cos(2 * torch.pi * self.gait_process) * (self.gait_frequency > 1.0e-8).float()).unsqueeze(-1)
+        gait_sin = (torch.sin(2 * torch.pi * self.gait_process) * (self.gait_frequency > 1.0e-8).float()).unsqueeze(-1)
+        
+        self.proprioceptive_obs_buf = torch.cat((
+            self.projected_gravity,  # 3D
+            self.base_ang_vel * self.obs_scales.ang_vel,  # 3D
+            self.commands[:, :3] * commands_scale,  # 3D  
+            gait_cos,  # 1D - gait phase cosine
+            gait_sin,  # 1D - gait phase sine
+            (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,  # 6D
+            self.dof_vel * self.obs_scales.dof_vel,  # 6D
+            self.actions,  # 6D - current actions only
+        ), dim=-1)  # Total: 3+3+3+1+1+6+6+6 = 29
 
     def create_sim(self):
         """ Creates simulation, terrain and environments
@@ -497,6 +521,19 @@ class PointFoot:
 
         # set small commands to zero
         self.commands[env_ids, :2] *= (torch.norm(self.commands[env_ids, :2], dim=1) > 0.2).unsqueeze(1)
+        
+        # Resample gait frequency (following t1.py design)
+        self.gait_frequency[env_ids] = torch_rand_float(
+            self.command_ranges["gait_frequency"][0], 
+            self.command_ranges["gait_frequency"][1], 
+            (len(env_ids), 1), 
+            device=self.device
+        ).squeeze(1)
+        
+        # Set some environments to be still (no gait)
+        still_envs = env_ids[torch.randperm(len(env_ids))[:int(self.cfg.commands.still_proportion * len(env_ids))]]
+        self.commands[still_envs, :] = 0.0
+        self.gait_frequency[still_envs] = 0.0
 
     def _compute_torques(self, actions):
         """ Compute torques from actions.
@@ -718,10 +755,17 @@ class PointFoot:
                                         requires_grad=False)
         self.last_dof_vel = torch.zeros_like(self.dof_vel)
         self.last_root_vel = torch.zeros_like(self.root_states[:, 7:13])
+        # Add filtered velocities for stable reward computation (currently disabled)
+        # self.filtered_lin_vel = self.base_lin_vel.clone()
+        # self.filtered_ang_vel = self.base_ang_vel.clone()
+        
         self.commands = torch.zeros(self.num_envs, self.cfg.commands.num_commands, dtype=torch.float,
                                     device=self.device, requires_grad=False)  # x vel, y vel, yaw vel, heading
         self.commands_scale = torch.tensor([self.obs_scales.lin_vel, self.obs_scales.lin_vel, self.obs_scales.ang_vel],
                                            device=self.device, requires_grad=False, )  # TODO change this
+        # Add gait variables (following t1.py design)
+        self.gait_frequency = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.gait_process = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.feet_air_time = torch.zeros(self.num_envs, self.feet_indices.shape[0], dtype=torch.float,
                                          device=self.device, requires_grad=False)
         self.last_feet_air_time = torch.zeros(self.num_envs, self.feet_indices.shape[0], dtype=torch.float,
@@ -1174,26 +1218,36 @@ class PointFoot:
     '''
     # 1. linear velocity tracking
     def _reward_tracking_lin_vel(self):
-        # Tracking the linear velocity command
-        pass
+        # Tracking the linear velocity command (x and y axes) using real base velocity
+        # This directly aligns with evaluation metrics for better scoring
+        lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
+        return torch.exp(-lin_vel_error / self.cfg.rewards.tracking_sigma)
 
     # 2. angular velocity tracking
     def _reward_tracking_ang_vel(self):
-        # Tracking the angular velocity command
-        pass
+        # Tracking the angular velocity command (yaw axis) using real base velocity
+        # This directly aligns with evaluation metrics for better scoring
+        ang_vel_error = torch.square(self.commands[:, 2] - self.base_ang_vel[:, 2])
+        return torch.exp(-ang_vel_error / self.cfg.rewards.tracking_sigma)
     
     # 3. base height tracking (typically, the target base height is set as a constant)
     def _reward_base_height(self):
         # Penalize base height away from target
-        base_height = torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
+        base_height = self.root_states[:, 2] - self.measured_heights
         return torch.square(base_height - self.cfg.rewards.base_height_target)
 
     # but you can also treat the base height as a control target (by adding the base height to the commands)
     def _reward_tracking_base_height(self):
-        # Tracking the base height command
-        pass
+        # NOTE: Currently commands[:, 3] is 'heading', not base_height
+        # This function is disabled until base_height is added to commands
+        # If you want to track base height, you need to:
+        # 1. Add base_height to commands (expand to 5 dimensions)
+        # 2. Update config num_commands = 5
+        # 3. Then use: height_error = torch.square(base_height - self.commands[:, 4])
+
+        return torch.zeros(self.num_envs, device=self.device)  # Disabled for now
 
     # 4. flat orientation
     def _reward_orientation(self):
         # Penalize non flat base orientation
-        pass
+        return torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)

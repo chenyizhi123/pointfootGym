@@ -3,7 +3,7 @@ from legged_gym.envs.base.base_config import BaseConfig
 class PointFootRoughCfg(BaseConfig):
     class env:
         num_envs = 8192
-        num_propriceptive_obs = 27
+        num_propriceptive_obs = 29  # Updated: 3(gravity) + 3(ang_vel) + 3(commands) + 2(gait) + 6(dof_pos) + 6(dof_vel) + 6(actions) = 29
         num_privileged_obs = 148  # if not None a priviledge_obs_buf will be returned by step() (critic obs for assymetric training). None is returned otherwise
         num_actions = 6
         env_spacing = 3.  # not used with heightfields/trimeshes
@@ -43,12 +43,14 @@ class PointFootRoughCfg(BaseConfig):
         num_commands = 4  # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
         resampling_time = 10.  # time before command are changed[s]
         heading_command = True  # if true: compute ang vel command from heading error
+        still_proportion = 0.1  # proportion of environments that stay still (gait_frequency = 0)
 
         class ranges:
             lin_vel_x = [-1.0, 1.0]  # min max [m/s]
             lin_vel_y = [-0.2, 0.2]  # min max [m/s]
             ang_vel_yaw = [-1, 1]  # min max [rad/s]
             heading = [-3.14, 3.14]
+            gait_frequency = [1.0, 3.0]  # min max [Hz] - gait frequency range
 
     class init_state:
         pos = [0.0, 0.0, 0.62]  # x,y,z [m]
@@ -137,16 +139,22 @@ class PointFootRoughCfg(BaseConfig):
 
     class rewards:
         class scales:
-            action_rate = -0.01
-            ang_vel_xy = -0.05
-            base_height = -2.0
-            collision = -50.0
-            dof_acc = -2.5e-07
-            feet_air_time = 0.0
-            torque_limits = -0.1
-            torques = -2.5e-05
-            feet_distance = -100
-            survival = 1
+            # Core tracking rewards (NEW - Phase 1)
+            tracking_lin_vel = 1.5      # Linear velocity tracking - high priority
+            tracking_ang_vel = 0.8      # Angular velocity tracking - medium priority  
+            orientation = -2.0          # Penalize non-flat orientation - important for stability
+            
+            # Existing rewards - optimized weights
+            action_rate = -0.01         # Penalize action changes for smoothness
+            ang_vel_xy = -0.05          # Penalize roll/pitch angular velocities
+            base_height = -2.0          # Maintain target height
+            collision = -50.0           # Strong penalty for unwanted contacts
+            dof_acc = -2.5e-07          # Penalize joint accelerations
+            feet_air_time = 0.0         # Currently disabled, will optimize later
+            torque_limits = -0.1        # Penalize near-limit torques
+            torques = -2.5e-05          # Energy efficiency
+            feet_distance = -100        # Maintain proper foot spacing
+            survival = 1.0              # Basic survival reward
 
         base_height_target = 0.62
         soft_dof_pos_limit = 0.95  # percentage of urdf limits, values above this limit are penalized
@@ -158,6 +166,9 @@ class PointFootRoughCfg(BaseConfig):
         min_feet_air_time = 0.25
         max_feet_air_time = 0.65
         tracking_sigma = 0.25  # tracking reward = exp(-error^2/sigma)
+        # Mixed reward weights - no longer used since we removed filtering
+        # filtered_weight = 0.7     # Weight for filtered velocity (stability)  
+        # real_weight = 0.3         # Weight for real velocity (evaluation alignment)
 
     class normalization:
         class obs_scales:
@@ -169,6 +180,7 @@ class PointFootRoughCfg(BaseConfig):
 
         clip_observations = 100.
         clip_actions = 100.
+        # filter_weight = 0.05  # No longer used - removed filtering for direct evaluation alignment
 
     class noise:
         add_noise = True
