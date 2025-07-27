@@ -140,21 +140,21 @@ class PointFootRoughCfg(BaseConfig):
     class rewards:
         class scales:
             # Core tracking rewards (NEW - Phase 1)
-            tracking_lin_vel = 1.5      # Linear velocity tracking - high priority
-            tracking_ang_vel = 0.8      # Angular velocity tracking - medium priority  
-            orientation = -2.0          # Penalize non-flat orientation - important for stability
-            
+            tracking_lin_vel = 1.2      # Linear velocity tracking - high priority
+            tracking_ang_vel = 0.6      # Angular velocity tracking - medium priority  
+            orientation = -10.0          # Penalize non-flat orientation - important for stability
+            lin_vel_z = -0.5
             # Existing rewards - optimized weights
             action_rate = -0.01         # Penalize action changes for smoothness
             ang_vel_xy = -0.05          # Penalize roll/pitch angular velocities
             base_height = -2.0          # Maintain target height
-            collision = -50.0           # Strong penalty for unwanted contacts
+            collision = -60.0           # Strong penalty for unwanted contacts
             dof_acc = -2.5e-07          # Penalize joint accelerations
             feet_air_time = 0.0         # Currently disabled, will optimize later
             torque_limits = -0.1        # Penalize near-limit torques
             torques = -2.5e-05          # Energy efficiency
             feet_distance = -100        # Maintain proper foot spacing
-            survival = 1.0              # Basic survival reward
+            survival = 1.5              # Basic survival reward
 
         base_height_target = 0.62
         soft_dof_pos_limit = 0.95  # percentage of urdf limits, values above this limit are penalized
