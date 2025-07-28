@@ -1,6 +1,7 @@
 import os
 import sys
 from typing import Dict
+import numpy as np
 
 import torch
 from isaacgym import gymtorch, gymapi, gymutil
@@ -171,20 +172,12 @@ class PointFoot:
 
         self.episode_length_buf += 1
         self.common_step_counter += 1
-        
-        # Update gait process (following t1.py design)
-        self.gait_process[:] = torch.fmod(self.gait_process + self.dt * self.gait_frequency, 1.0)
 
         # prepare quantities
         self.base_quat[:] = self.root_states[:, 3:7]
         self.base_lin_vel[:] = quat_rotate_inverse(self.base_quat, self.root_states[:, 7:10])
         self.base_ang_vel[:] = quat_rotate_inverse(self.base_quat, self.root_states[:, 10:13])
         self.projected_gravity[:] = quat_rotate_inverse(self.base_quat, self.gravity_vec)
-        
-        # Update filtered velocities using exponential moving average for stable rewards (currently disabled)
-        # filter_weight = getattr(self.cfg.normalization, 'filter_weight', 0.05)  # Default 0.05 if not specified
-        # self.filtered_lin_vel[:] = self.base_lin_vel[:] * filter_weight + self.filtered_lin_vel[:] * (1.0 - filter_weight)
-        # self.filtered_ang_vel[:] = self.base_ang_vel[:] * filter_weight + self.filtered_ang_vel[:] * (1.0 - filter_weight)
         if self.cfg.terrain.measure_heights_actor or self.cfg.terrain.measure_heights_critic:
             self.measured_heights = self._get_heights()
         self._compute_feet_states()
@@ -271,8 +264,8 @@ class PointFoot:
         self.last_max_feet_height[env_ids] = 0.
         self.episode_length_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
-        # Reset gait variables for new episodes
-        self.gait_process[env_ids] = 0.0
+        # 重置步态相关缓冲区
+        self.gait_indices[env_ids] = 0
 
     def compute_reward(self):
         """ Compute rewards
@@ -350,37 +343,28 @@ class PointFoot:
     def _compose_proprioceptive_obs_buf_no_height_measure(self):
         '''
         This function is used to compose the proprioceptive observations.
-        Following t1.py design with gait information:
+        Now it includes:
+        - base angular velocity
         - projected gravity
-        - base angular velocity  
-        - commands (scaled)
-        - gait phase (cos/sin)
         - DOF position (relative to default position)
         - DOF velocity
-        - actions (current actions only, no history needed)
+        - actions (scaled actions)
+        - commands (scaled commands)
+        - clock inputs (sin and cos of gait phase)
+        - gait parameters
+
+        You can add more observations here if needed.
         '''
-        # Commands scaling
-        commands_scale = torch.tensor([
-            self.obs_scales.lin_vel, 
-            self.obs_scales.lin_vel, 
-            self.obs_scales.ang_vel
-        ], device=self.device, requires_grad=False)
-        
-        # Gait phase information (like t1.py)
-        # Using real gait variables now
-        gait_cos = (torch.cos(2 * torch.pi * self.gait_process) * (self.gait_frequency > 1.0e-8).float()).unsqueeze(-1)
-        gait_sin = (torch.sin(2 * torch.pi * self.gait_process) * (self.gait_frequency > 1.0e-8).float()).unsqueeze(-1)
-        
-        self.proprioceptive_obs_buf = torch.cat((
-            self.projected_gravity,  # 3D
-            self.base_ang_vel * self.obs_scales.ang_vel,  # 3D
-            self.commands[:, :3] * commands_scale,  # 3D  
-            gait_cos,  # 1D - gait phase cosine
-            gait_sin,  # 1D - gait phase sine
-            (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,  # 6D
-            self.dof_vel * self.obs_scales.dof_vel,  # 6D
-            self.actions,  # 6D - current actions only
-        ), dim=-1)  # Total: 3+3+3+1+1+6+6+6 = 29
+        self.proprioceptive_obs_buf = torch.cat((self.base_ang_vel * self.obs_scales.ang_vel,
+                                                 self.projected_gravity,
+                                                 (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
+                                                 self.dof_vel * self.obs_scales.dof_vel,
+                                                 self.actions,
+                                                 self.commands[:, :3] * self.commands_scale,
+                                                 self.clock_inputs_sin.view(self.num_envs, 1),
+                                                 self.clock_inputs_cos.view(self.num_envs, 1),
+                                                 self.gaits,
+                                                 ), dim=-1)
 
     def create_sim(self):
         """ Creates simulation, terrain and environments
@@ -487,6 +471,10 @@ class PointFoot:
         env_ids = (self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt) == 0).nonzero(
             as_tuple=False).flatten()
         self._resample(env_ids)
+        
+        # 步态控制更新
+        self._step_contact_targets()
+        
         if self.cfg.commands.heading_command:
             forward = quat_apply(self.base_quat, self.forward_vec)
             heading = torch.atan2(forward[:, 1], forward[:, 0])
@@ -497,6 +485,7 @@ class PointFoot:
 
     def _resample(self, env_ids):
         self._resample_commands(env_ids)
+        self._resample_gaits(env_ids)
 
     def _resample_commands(self, env_ids):
         """ Randommly select commands of some environments
@@ -521,19 +510,6 @@ class PointFoot:
 
         # set small commands to zero
         self.commands[env_ids, :2] *= (torch.norm(self.commands[env_ids, :2], dim=1) > 0.2).unsqueeze(1)
-        
-        # Resample gait frequency (following t1.py design)
-        self.gait_frequency[env_ids] = torch_rand_float(
-            self.command_ranges["gait_frequency"][0], 
-            self.command_ranges["gait_frequency"][1], 
-            (len(env_ids), 1), 
-            device=self.device
-        ).squeeze(1)
-        
-        # Set some environments to be still (no gait)
-        still_envs = env_ids[torch.randperm(len(env_ids))[:int(self.cfg.commands.still_proportion * len(env_ids))]]
-        self.commands[still_envs, :] = 0.0
-        self.gait_frequency[still_envs] = 0.0
 
     def _compute_torques(self, actions):
         """ Compute torques from actions.
@@ -755,17 +731,10 @@ class PointFoot:
                                         requires_grad=False)
         self.last_dof_vel = torch.zeros_like(self.dof_vel)
         self.last_root_vel = torch.zeros_like(self.root_states[:, 7:13])
-        # Add filtered velocities for stable reward computation (currently disabled)
-        # self.filtered_lin_vel = self.base_lin_vel.clone()
-        # self.filtered_ang_vel = self.base_ang_vel.clone()
-        
         self.commands = torch.zeros(self.num_envs, self.cfg.commands.num_commands, dtype=torch.float,
                                     device=self.device, requires_grad=False)  # x vel, y vel, yaw vel, heading
         self.commands_scale = torch.tensor([self.obs_scales.lin_vel, self.obs_scales.lin_vel, self.obs_scales.ang_vel],
                                            device=self.device, requires_grad=False, )  # TODO change this
-        # Add gait variables (following t1.py design)
-        self.gait_frequency = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
-        self.gait_process = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.feet_air_time = torch.zeros(self.num_envs, self.feet_indices.shape[0], dtype=torch.float,
                                          device=self.device, requires_grad=False)
         self.last_feet_air_time = torch.zeros(self.num_envs, self.feet_indices.shape[0], dtype=torch.float,
@@ -814,6 +783,37 @@ class PointFoot:
                 if self.cfg.control.control_type in ["P", "V"]:
                     print(f"PD gain of joint {name} were not defined, setting them to zero")
         self.default_dof_pos = self.default_dof_pos.unsqueeze(0)
+
+        # 添加步态控制相关的缓冲区
+        self.gaits = torch.zeros(
+            self.num_envs,
+            4,  # frequency, offset, duration, swing_height
+            dtype=torch.float,
+            device=self.device,
+            requires_grad=False,
+        )
+        self.desired_contact_states = torch.zeros(
+            self.num_envs,
+            len(self.feet_indices),
+            dtype=torch.float,
+            device=self.device,
+            requires_grad=False,
+        )
+        self.gait_indices = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.clock_inputs_sin = torch.zeros(
+            self.num_envs,
+            dtype=torch.float,
+            device=self.device,
+            requires_grad=False,
+        )
+        self.clock_inputs_cos = torch.zeros(
+            self.num_envs,
+            dtype=torch.float,
+            device=self.device,
+            requires_grad=False,
+        )
 
     def _prepare_reward_function(self):
         """ Prepares a list of reward functions, whcih will be called to compute the total reward.
@@ -1028,6 +1028,10 @@ class PointFoot:
         self.max_episode_length = np.ceil(self.max_episode_length_s / self.dt)
 
         self.cfg.domain_rand.push_interval = np.ceil(self.cfg.domain_rand.push_interval_s / self.dt)
+        
+        # 添加步态范围配置
+        self.gaits_ranges = class_to_dict(self.cfg.gait.ranges)
+
 
     def _draw_debug_vis(self):
         """ Draws visualizations for dubugging (slows down simulation a lot).
@@ -1149,10 +1153,23 @@ class PointFoot:
         self.first_contact = (self.feet_air_time > 0.) * self.contact_filt
         self.feet_air_time += self.dt
 
-    # ------------ reward functions----------------
+    # ==================== 第一类：原有的基础Reward函数 ====================
+    def _reward_lin_vel_z(self):
+        # Penalize z axis base linear velocity
+        return torch.square(self.base_lin_vel[:, 2])
+
     def _reward_ang_vel_xy(self):
         # Penalize xy axes base angular velocity
         return torch.sum(torch.square(self.base_ang_vel[:, :2]), dim=1)
+
+    def _reward_orientation(self):
+        # Penalize non flat base orientation
+        return torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)
+
+    def _reward_base_height(self):
+        # Penalize base height away from target
+        base_height = torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
+        return torch.square(base_height - self.cfg.rewards.base_height_target)
 
     def _reward_torques(self):
         # Penalize torques
@@ -1201,6 +1218,13 @@ class PointFoot:
 
     def _reward_survival(self):
         return (~self.reset_buf).float()
+    # ==================== 第二类：TODO中的跟踪类Reward函数 ====================
+    def _reward_tracking_lin_vel(self):
+        # Tracking the linear velocity command
+        lin_vel_error = torch.sum(
+            torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1
+        )
+        return torch.exp(-lin_vel_error / self.cfg.rewards.tracking_sigma)
 
     # ------- TODO: add reward function for velocity tracking task -------
     '''
@@ -1217,46 +1241,177 @@ class PointFoot:
 
     '''
     # 1. linear velocity tracking
-    def _reward_tracking_lin_vel(self):
-        # Tracking the linear velocity command (x and y axes) using real base velocity
-        # This directly aligns with evaluation metrics for better scoring
-        lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
-        return torch.exp(-lin_vel_error / self.cfg.rewards.tracking_sigma)
-
-    # 2. angular velocity tracking
     def _reward_tracking_ang_vel(self):
-        # Tracking the angular velocity command (yaw axis) using real base velocity
-        # This directly aligns with evaluation metrics for better scoring
+        # Tracking of angular velocity commands
         ang_vel_error = torch.square(self.commands[:, 2] - self.base_ang_vel[:, 2])
-        return torch.exp(-ang_vel_error / self.cfg.rewards.tracking_sigma)
-    
-    # 3. base height tracking (typically, the target base height is set as a constant)
-    def _reward_base_height(self):
-        # Penalize base height away from target
-        base_height = torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1) 
-        return torch.square(base_height - self.cfg.rewards.base_height_target)
+        return torch.exp(-ang_vel_error / self.cfg.rewards.ang_tracking_sigma)
 
-    # but you can also treat the base height as a control target (by adding the base height to the commands)
     def _reward_tracking_base_height(self):
-        # NOTE: Currently commands[:, 3] is 'heading', not base_height
-        # This function is disabled until base_height is added to commands
-        # If you want to track base height, you need to:
-        # 1. Add base_height to commands (expand to 5 dimensions)
-        # 2. Update config num_commands = 5
-        # 3. Then use: height_error = torch.square(base_height - self.commands[:, 4])
+        # Tracking the base height command
+        if self.commands.shape[1] > 3:  # 假设第4个命令是目标高度
+            base_height = torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
+            height_error = torch.square(self.commands[:, 3] - base_height)
+            return torch.exp(-height_error / self.cfg.rewards.tracking_sigma)
+        else:
+            return torch.zeros(self.num_envs, device=self.device)
 
-        return torch.zeros(self.num_envs, device=self.device)  # Disabled for now
+    def _reward_tracking_contacts_shaped_force(self):
+        """基于接触力的步态奖励"""
+        foot_forces = torch.norm(self.contact_forces[:, self.feet_indices, :], dim=-1)
+        desired_contact = self.desired_contact_states
 
-    # 4. flat orientation
-    def _reward_orientation(self):
-        # Penalize non flat base orientation
-        return torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)
-    
-    #5.add 
-    def _reward_lin_vel_z(self):
-        # Penalize z axis base linear velocity
-        return torch.square(self.base_lin_vel[:, 2])
-    def _reward_feet_swing(self):
-        left_swing = (torch.abs(self.gait_process - 0.25) < 0.5 * 0.2) & (self.gait_frequency > 1.0e-8)
-        right_swing = (torch.abs(self.gait_process - 0.75) < 0.5 * 0.2) & (self.gait_frequency > 1.0e-8)
-        return (left_swing & ~self.feet_contact[:, 0]).float() + (right_swing & ~self.feet_contact[:, 1]).float()
+        reward = 0
+        for i in range(len(self.feet_indices)):
+            reward += (1 - desired_contact[:, i]) * torch.exp(
+                -foot_forces[:, i] ** 2 / self.cfg.rewards.gait_force_sigma)
+        return reward / len(self.feet_indices)
+
+    def _reward_tracking_contacts_shaped_vel(self):
+        """基于脚部速度的步态奖励"""
+        foot_velocities = torch.norm(self.feet_state[:, :, 7:10], dim=-1)  # 线性速度
+        desired_contact = self.desired_contact_states
+        
+        reward = 0
+        for i in range(len(self.feet_indices)):
+            reward += desired_contact[:, i] * torch.exp(
+                -foot_velocities[:, i] ** 2 / self.cfg.rewards.gait_vel_sigma
+            )
+        return reward / len(self.feet_indices)
+
+    def _reward_tracking_contacts_shaped_height(self):
+        # Reward foot height based on gait phase
+        desired_contact = self.desired_contact_states
+        swing_height = self.gaits[:, 3]
+        
+        reward = 0
+        for i in range(len(self.feet_indices)):
+            # Swinging foot should be higher
+            target_height = (1 - desired_contact[:, i]) * swing_height
+            height_error = torch.square(self.foot_heights[:, i] - target_height)
+            reward += torch.exp(-height_error / self.cfg.rewards.tracking_sigma)
+        return reward / len(self.feet_indices)
+
+    # ==================== 第三类：后来新加的Reward函数 ====================
+    def _reward_action_smooth(self):
+        # Penalize changes in actions
+        if self.last_actions.dim() == 3:
+            return torch.sum(
+                torch.square(
+                    self.actions - 2 * self.last_actions[:, :, 0] + self.last_actions[:, :, 1]), dim=1)
+        else:
+            # Fallback for 2D last_actions
+            return torch.sum(torch.square(self.actions - self.last_actions), dim=1)
+
+    def _reward_keep_balance(self):
+        return torch.ones(
+            self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
+
+    def _reward_feet_regulation(self):
+        feet_height = self.cfg.rewards.base_height_target * 0.001
+        reward = torch.sum(
+            torch.exp(-self.foot_heights / feet_height)
+            * torch.square(torch.norm(self.foot_velocities[:, :, :2], dim=-1)), dim=1)
+        return reward
+
+    def _reward_foot_landing_vel(self):
+        z_vels = self.foot_velocities[:, :, 2]
+        contacts = self.contact_forces[:, self.feet_indices, 2] > 0.1
+        about_to_land = (self.foot_heights < self.cfg.rewards.about_landing_threshold) & (~contacts) & (z_vels < 0.0)
+        landing_z_vels = torch.where(about_to_land, z_vels, torch.zeros_like(z_vels))
+        reward = torch.sum(torch.square(landing_z_vels), dim=1)
+        return reward
+
+    def _reward_feet_contact_number(self):
+        # Reward appropriate number of feet in contact (single foot support)
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
+        return torch.sum(contact, dim=1)
+    def _reward_dof_pos_limits(self):
+        # Penalize dof positions too close to limits
+        out_of_limits = -(self.dof_pos - self.dof_pos_limits[:, 0]).clip(max=0.0)
+        out_of_limits += (self.dof_pos - self.dof_pos_limits[:, 1]).clip(min=0.0)
+        return torch.sum(out_of_limits, dim=1)
+    # ------------ 步态控制相关方法 ----------------
+    def _step_contact_targets(self):
+        """更新步态接触目标状态"""
+        frequencies = self.gaits[:, 0]
+        offsets = self.gaits[:, 1]
+        durations = torch.cat(
+            [
+                self.gaits[:, 2].view(self.num_envs, 1),
+                self.gaits[:, 2].view(self.num_envs, 1),
+            ],
+            dim=1,
+        )
+        self.gait_indices = torch.remainder(
+            self.gait_indices + self.dt * frequencies, 1.0
+        )
+
+        self.clock_inputs_sin = torch.sin(2 * torch.pi * self.gait_indices)
+        self.clock_inputs_cos = torch.cos(2 * torch.pi * self.gait_indices)
+
+        # von mises distribution
+        kappa = 10.0  # 如果没有在config中定义，使用默认值
+        if hasattr(self.cfg.rewards, 'kappa_gait_probs'):
+            kappa = self.cfg.rewards.kappa_gait_probs
+        
+        smoothing_cdf_start = torch.distributions.normal.Normal(0, kappa).cdf
+
+        foot_indices = torch.remainder(
+            torch.cat(
+                [
+                    self.gait_indices.view(self.num_envs, 1),
+                    (self.gait_indices + offsets + 1).view(self.num_envs, 1),
+                ],
+                dim=1,
+            ),
+            1.0,
+        )
+        stance_idxs = foot_indices < durations
+        swing_idxs = foot_indices > durations
+
+        foot_indices[stance_idxs] = torch.remainder(foot_indices[stance_idxs], 1) * (
+            0.5 / durations[stance_idxs]
+        )
+        foot_indices[swing_idxs] = 0.5 + (
+            torch.remainder(foot_indices[swing_idxs], 1) - durations[swing_idxs]
+        ) * (0.5 / (1 - durations[swing_idxs]))
+
+        self.desired_contact_states = smoothing_cdf_start(foot_indices) * (
+            1 - smoothing_cdf_start(foot_indices - 0.5)
+        ) + smoothing_cdf_start(foot_indices - 1) * (
+            1 - smoothing_cdf_start(foot_indices - 1.5)
+        )
+        
+    def _resample_gaits(self, env_ids):
+        """重新采样步态参数"""
+        if len(env_ids) == 0:
+            return
+        self.gaits[env_ids, 0] = torch_rand_float(
+            self.gaits_ranges["frequencies"][0],
+            self.gaits_ranges["frequencies"][1],
+            (len(env_ids), 1),
+            device=self.device,
+        ).squeeze(1)
+
+        self.gaits[env_ids, 1] = torch_rand_float(
+            self.gaits_ranges["offsets"][0],
+            self.gaits_ranges["offsets"][1],
+            (len(env_ids), 1),
+            device=self.device,
+        ).squeeze(1)
+        # 双足机器人简化为0.5偏移
+        self.gaits[env_ids, 1] = 0.5
+
+        self.gaits[env_ids, 2] = torch_rand_float(
+            self.gaits_ranges["durations"][0],
+            self.gaits_ranges["durations"][1],
+            (len(env_ids), 1),
+            device=self.device,
+        ).squeeze(1)
+
+        self.gaits[env_ids, 3] = torch_rand_float(
+            self.gaits_ranges["swing_height"][0],
+            self.gaits_ranges["swing_height"][1],
+            (len(env_ids), 1),
+            device=self.device,
+        ).squeeze(1)
