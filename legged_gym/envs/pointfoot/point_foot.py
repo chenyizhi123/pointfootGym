@@ -1256,3 +1256,7 @@ class PointFoot:
     def _reward_lin_vel_z(self):
         # Penalize z axis base linear velocity
         return torch.square(self.base_lin_vel[:, 2])
+    def _reward_feet_swing(self):
+        left_swing = (torch.abs(self.gait_process - 0.25) < 0.5 * 0.2) & (self.gait_frequency > 1.0e-8)
+        right_swing = (torch.abs(self.gait_process - 0.75) < 0.5 * 0.2) & (self.gait_frequency > 1.0e-8)
+        return (left_swing & ~self.feet_contact[:, 0]).float() + (right_swing & ~self.feet_contact[:, 1]).float()

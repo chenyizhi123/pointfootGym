@@ -148,14 +148,14 @@ class PointFootRoughCfg(BaseConfig):
             action_rate = -0.01         # Penalize action changes for smoothness
             ang_vel_xy = -0.05          # Penalize roll/pitch angular velocities
             base_height = -2.0          # Maintain target height
-            collision = -60.0           # Strong penalty for unwanted contacts
+            collision = -45.0           # Strong penalty for unwanted contacts
             dof_acc = -2.5e-07          # Penalize joint accelerations
             feet_air_time = 0.0         # Currently disabled, will optimize later
             torque_limits = -0.1        # Penalize near-limit torques
             torques = -2.5e-05          # Energy efficiency
             feet_distance = -100        # Maintain proper foot spacing
             survival = 1.5              # Basic survival reward
-
+            feet_swing =1.0
         base_height_target = 0.62
         soft_dof_pos_limit = 0.95  # percentage of urdf limits, values above this limit are penalized
         soft_dof_vel_limit = 0.9
