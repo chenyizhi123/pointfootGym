@@ -1278,18 +1278,18 @@ class PointFoot:
             )
         return reward / len(self.feet_indices)
 
-    def _reward_tracking_contacts_shaped_height(self):
-        # Reward foot height based on gait phase
-        desired_contact = self.desired_contact_states
-        swing_height = self.gaits[:, 3]
+    # def _reward_tracking_contacts_shaped_height(self):
+    #     # Reward foot height based on gait phase
+    #     desired_contact = self.desired_contact_states
+    #     swing_height = self.gaits[:, 3]
         
-        reward = 0
-        for i in range(len(self.feet_indices)):
-            # Swinging foot should be higher
-            target_height = (1 - desired_contact[:, i]) * swing_height
-            height_error = torch.square(self.foot_heights[:, i] - target_height)
-            reward += torch.exp(-height_error / self.cfg.rewards.tracking_sigma)
-        return reward / len(self.feet_indices)
+    #     reward = 0
+    #     for i in range(len(self.feet_indices)):
+    #         # Swinging foot should be higher
+    #         target_height = (1 - desired_contact[:, i]) * swing_height
+    #         height_error = torch.square(self.foot_heights[:, i] - target_height)
+    #         reward += torch.exp(-height_error / self.cfg.rewards.tracking_sigma)
+    #     return reward / len(self.feet_indices)
 
     # ==================== 第三类：后来新加的Reward函数 ====================
     def _reward_action_smooth(self):
@@ -1306,20 +1306,20 @@ class PointFoot:
         return torch.ones(
             self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
 
-    def _reward_feet_regulation(self):
-        feet_height = self.cfg.rewards.base_height_target * 0.001
-        reward = torch.sum(
-            torch.exp(-self.foot_heights / feet_height)
-            * torch.square(torch.norm(self.foot_velocities[:, :, :2], dim=-1)), dim=1)
-        return reward
+    # def _reward_feet_regulation(self):
+    #     feet_height = self.cfg.rewards.base_height_target * 0.001
+    #     reward = torch.sum(
+    #         torch.exp(-self.foot_heights / feet_height)
+    #         * torch.square(torch.norm(self.foot_velocities[:, :, :2], dim=-1)), dim=1)
+    #     return reward
 
-    def _reward_foot_landing_vel(self):
-        z_vels = self.foot_velocities[:, :, 2]
-        contacts = self.contact_forces[:, self.feet_indices, 2] > 0.1
-        about_to_land = (self.foot_heights < self.cfg.rewards.about_landing_threshold) & (~contacts) & (z_vels < 0.0)
-        landing_z_vels = torch.where(about_to_land, z_vels, torch.zeros_like(z_vels))
-        reward = torch.sum(torch.square(landing_z_vels), dim=1)
-        return reward
+    # def _reward_foot_landing_vel(self):
+    #     z_vels = self.foot_velocities[:, :, 2]
+    #     contacts = self.contact_forces[:, self.feet_indices, 2] > 0.1
+    #     about_to_land = (self.foot_heights < self.cfg.rewards.about_landing_threshold) & (~contacts) & (z_vels < 0.0)
+    #     landing_z_vels = torch.where(about_to_land, z_vels, torch.zeros_like(z_vels))
+    #     reward = torch.sum(torch.square(landing_z_vels), dim=1)
+    #     return reward
 
     def _reward_feet_contact_number(self):
         # Reward appropriate number of feet in contact (single foot support)

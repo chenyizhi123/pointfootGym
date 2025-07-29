@@ -47,7 +47,7 @@ class PointFootRoughCfg(BaseConfig):
         curriculum_threshold = 0.75
         num_commands = 3  # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
         resampling_time = 5.0  # time before command are changed[s]
-        heading_command = True  # if true: compute ang vel command from heading error, only work on adaptive group
+        heading_command = False  # if true: compute ang vel command from heading error, only work on adaptive group
         min_norm = 0.1
         zero_command_prob = 0.0
 
@@ -175,8 +175,8 @@ class PointFootRoughCfg(BaseConfig):
             action_smooth = -0.01
             orientation = -10.0
             feet_distance = -100
-            feet_regulation = -0.05
-            foot_landing_vel = -0.15
+            # feet_regulation = -0.05
+            # foot_landing_vel = -0.15
             tracking_contacts_shaped_force = -2
             tracking_contacts_shaped_vel = -2
             
@@ -185,7 +185,7 @@ class PointFootRoughCfg(BaseConfig):
             torque_limits = 0.0
             survival = 0.0
             feet_swing = 0.0
-            tracking_contacts_shaped_height = 0.0
+            # tracking_contacts_shaped_height = 0.0
             feet_contact_number = 0.0
         only_positive_rewards = False  # if true negative total rewards are clipped at zero (avoids early termination problems)
         clip_reward = 100
