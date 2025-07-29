@@ -40,7 +40,7 @@ if not robot_type:
     print("Error: Please set the ROBOT_TYPE using 'export ROBOT_TYPE=<robot_type>'.")
     sys.exit(1)
 if robot_type.startswith("PF"):
-    from legged_gym.envs.pointfoot.point_foot import PointFoot
+    from point_foot import PointFoot
     from legged_gym.envs.pointfoot.pointfoot_rough_config import PointFootRoughCfg, PointFootRoughCfgPPO
     task_registry.register("pointfoot_rough", PointFoot, PointFootRoughCfg(), PointFootRoughCfgPPO())
 else:

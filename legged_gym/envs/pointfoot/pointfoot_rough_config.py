@@ -3,7 +3,7 @@ from legged_gym.envs.base.base_config import BaseConfig
 class PointFootRoughCfg(BaseConfig):
     class env:
         num_envs = 8192
-        num_propriceptive_obs = 33  # Updated: 3(gravity) + 3(ang_vel) + 3(commands) + 6(dof_pos) + 6(dof_vel) + 6(actions) + 1(clock_sin) + 1(clock_cos) + 4(gaits) = 33
+        num_propriceptive_obs = 27
         num_privileged_obs = 148  # if not None a priviledge_obs_buf will be returned by step() (critic obs for assymetric training). None is returned otherwise
         num_actions = 6
         env_spacing = 3.  # not used with heightfields/trimeshes
@@ -38,34 +38,17 @@ class PointFootRoughCfg(BaseConfig):
         slope_treshold = 0.75  # slopes above this threshold will be corrected to vertical surfaces
 
     class commands:
-        curriculum = True
-        smooth_max_lin_vel_x = 2.0
-        smooth_max_lin_vel_y = 1.0
-        non_smooth_max_lin_vel_x = 1.0
-        non_smooth_max_lin_vel_y = 1.0
-        max_ang_vel_yaw = 3.0
-        curriculum_threshold = 0.75
-        num_commands = 3  # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
-        resampling_time = 5.0  # time before command are changed[s]
-        heading_command = True  # if true: compute ang vel command from heading error, only work on adaptive group
-        min_norm = 0.1
-        zero_command_prob = 0.0
+        curriculum = False
+        max_curriculum = 1.
+        num_commands = 4  # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
+        resampling_time = 10.  # time before command are changed[s]
+        heading_command = True  # if true: compute ang vel command from heading error
 
         class ranges:
             lin_vel_x = [-1.0, 1.0]  # min max [m/s]
-            lin_vel_y = [-0.6, 0.6]  # min max [m/s]
+            lin_vel_y = [-0.2, 0.2]  # min max [m/s]
             ang_vel_yaw = [-1, 1]  # min max [rad/s]
-            heading = [-3.14159, 3.14159]
-
-    class gait:
-        num_gait_params = 4
-        resampling_time = 5  # time before command are changed[s]
-        
-        class ranges:
-            frequencies = [1.5, 2.5]
-            offsets = [0, 1]  # offset is hard to learn
-            durations = [0.5, 0.5]  # small durations(<0.4) is hard to learn
-            swing_height = [0.0, 0.1]
+            heading = [-3.14, 3.14]
 
     class init_state:
         pos = [0.0, 0.0, 0.62]  # x,y,z [m]
@@ -110,8 +93,6 @@ class PointFootRoughCfg(BaseConfig):
         action_scale = 0.5
         # decimation: Number of control action updates @ sim DT per policy DT
         decimation = 4
-        user_torque_limit = 80.0
-        max_power = 1000.0  # [W]
 
     class asset:
         import os
@@ -156,60 +137,30 @@ class PointFootRoughCfg(BaseConfig):
 
     class rewards:
         class scales:
-            # termination related rewards
-            keep_balance = 1.0
-
-            # tracking related rewards
-            tracking_lin_vel = 1
-            tracking_ang_vel = 0.5
-
-            # regulation related rewards
-            base_height = -2
-            lin_vel_z = -0.5
-            ang_vel_xy = -0.05
-            torques = -0.00008
-            dof_acc = -2.5e-7
             action_rate = -0.01
-            dof_pos_limits = -2.0
-            collision = -1
-            action_smooth = -0.01
-            orientation = -10.0
-            feet_distance = -100
-            feet_regulation = -0.05
-            foot_landing_vel = -0.15
-            tracking_contacts_shaped_force = -2
-            tracking_contacts_shaped_vel = -2
-            
-            # additional reward functions (set to 0 if not needed)
+            ang_vel_xy = -0.05
+            base_height = -2.0
+            collision = -50.0
+            dof_acc = -2.5e-07
             feet_air_time = 0.0
-            torque_limits = 0.0
-            survival = 0.0
-            feet_swing = 0.0
-            tracking_contacts_shaped_height = 0.0
-            feet_contact_number = 0.0
-        only_positive_rewards = False  # if true negative total rewards are clipped at zero (avoids early termination problems)
-        clip_reward = 100
-        clip_single_reward = 5
-        tracking_sigma = 0.2  # tracking reward = exp(-error^2/sigma)
-        ang_tracking_sigma = 0.25  # tracking reward = exp(-error^2/sigma)
-        height_tracking_sigma = 0.01
+            torque_limits = -0.1
+            torques = -2.5e-05
+            feet_distance = -100
+            survival = 1
+            tracking_lin_vel =1.0
+            tracking_ang_vel =0.5
+            base_height  =-1.2
+            orientation = -1.5
+        base_height_target = 0.62
         soft_dof_pos_limit = 0.95  # percentage of urdf limits, values above this limit are penalized
-        soft_dof_vel_limit = 1.0
+        soft_dof_vel_limit = 0.9
         soft_torque_limit = 0.8
-        base_height_target = 0.68  # 0.58
-        feet_height_target = 0.10
-        min_feet_distance = 0.115
-        about_landing_threshold = 0.08
-        max_contact_force = 100.0  # forces above this value are penalized
-        kappa_gait_probs = 0.05
-        gait_force_sigma = 25.0
-        gait_vel_sigma = 0.25
-        gait_height_sigma = 0.005
+        max_contact_force = 200.  # forces above this value are penalized
+        only_positive_rewards = False  # if true negative total rewards are clipped at zero (avoids early termination problems)
+        min_feet_distance = 0.1
         min_feet_air_time = 0.25
         max_feet_air_time = 0.65
-        # Mixed reward weights - no longer used since we removed filtering
-        # filtered_weight = 0.7     # Weight for filtered velocity (stability)  
-        # real_weight = 0.3         # Weight for real velocity (evaluation alignment)
+        tracking_sigma = 0.25  # tracking reward = exp(-error^2/sigma)
 
     class normalization:
         class obs_scales:
@@ -221,7 +172,6 @@ class PointFootRoughCfg(BaseConfig):
 
         clip_observations = 100.
         clip_actions = 100.
-        # filter_weight = 0.05  # No longer used - removed filtering for direct evaluation alignment
 
     class noise:
         add_noise = True
