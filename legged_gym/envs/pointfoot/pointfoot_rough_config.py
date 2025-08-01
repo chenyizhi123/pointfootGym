@@ -49,7 +49,7 @@ class PointFootRoughCfg(BaseConfig):
         resampling_time = 5.0  # time before command are changed[s]
         heading_command = False  # if true: compute ang vel command from heading error, only work on adaptive group
         min_norm = 0.1
-        zero_command_prob = 0.0
+        zero_command_prob = 0.2
 
         class ranges:
             lin_vel_x = [-1.0, 1.0]  # min max [m/s]

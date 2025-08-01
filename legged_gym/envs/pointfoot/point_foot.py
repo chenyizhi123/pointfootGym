@@ -493,6 +493,8 @@ class PointFoot:
         Args:
             env_ids (List[int]): Environments ids for which new commands are needed
         """
+        if len(env_ids) == 0:
+            return
         self.commands[env_ids, 0] = torch_rand_float(self.command_ranges["lin_vel_x"][0],
                                                      self.command_ranges["lin_vel_x"][1], (len(env_ids), 1),
                                                      device=self.device).squeeze(1)
@@ -509,7 +511,14 @@ class PointFoot:
                                                          device=self.device).squeeze(1)
 
         # set small commands to zero
-        self.commands[env_ids, :2] *= (torch.norm(self.commands[env_ids, :2], dim=1) > 0.2).unsqueeze(1)
+        self.commands[env_ids, :2] *= (torch.norm(self.commands[env_ids, :2], dim=1) > self.cfg.commands.min_norm).unsqueeze(1)
+        
+        # apply zero command probability
+        if hasattr(self.cfg.commands, 'zero_command_prob') and self.cfg.commands.zero_command_prob > 0:
+            zero_prob_mask = torch.rand(len(env_ids), device=self.device) < self.cfg.commands.zero_command_prob
+            zero_command_idx = env_ids[zero_prob_mask]
+            if len(zero_command_idx) > 0:
+                self.commands[zero_command_idx, :3] = 0
 
     def _compute_torques(self, actions):
         """ Compute torques from actions.
