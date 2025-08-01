@@ -1,0 +1,64 @@
+PointfootCfg:
+  loop_frequency: 200  # 从500改为200，对齐Isaac Gym
+  joint_names:
+    - "abad_L_Joint"
+    - "hip_L_Joint"
+    - "knee_L_Joint"
+    - "abad_R_Joint"
+    - "hip_R_Joint"
+    - "knee_R_Joint"
+  
+  init_state:
+    # target angles [rad] when action = 0.0
+    default_joint_angle:
+      abad_L_Joint: 0.0
+      hip_L_Joint: 0.0
+      knee_L_Joint: 0.0
+
+      abad_R_Joint: 0.0
+      hip_R_Joint: 0.0
+      knee_R_Joint: 0.0
+
+  control:
+    # PD Drive parameters:
+    stiffness: 40.0
+    damping: 1.5  # 从2.0改为1.5，对齐Isaac Gym
+    action_scale_pos: 0.5
+    decimation: 4  # 从10改为4，对齐Isaac Gym
+    user_torque_limit: 80  # 从60改为80，对齐Isaac Gym
+
+  normalization:
+    clip_scales:
+      clip_observations: 100.
+      clip_actions: 100.
+    obs_scales:
+      lin_vel: 2.0
+      ang_vel: 0.25
+      dof_pos: 1.0
+      dof_vel: 0.05
+
+  size:
+    actions_size: 6
+    observations_size: 33  # 从27改为33，匹配Isaac Gym
+    commands_size: 3
+
+  stand_mode:
+    stand_duration: 1.0
+
+  imu_orientation_offset:
+    roll: 0.0
+    pitch: 0.0
+    yaw: 0.0
+
+  user_cmd_scales:
+    lin_vel_x: 1.5
+    lin_vel_y: 1.0
+    ang_vel_yaw: 0.5
+
+  # 新增：步态控制配置
+  gait_params:
+    frequency_range: [1.5, 2.5]   # 步态频率范围 [Hz]
+    offset: 0.5                   # 双足机器人固定偏移
+    duration_range: [0.4, 0.6]    # 支撑相持续时间范围
+    swing_height_range: [0.0, 0.1] # 摆动高度范围 [m]
+    resample_interval: 5          # 重采样间隔 [s]
