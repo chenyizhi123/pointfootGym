@@ -719,7 +719,18 @@ class PointFoot:
             self.num_envs, self.num_bodies, -1
         )
         self.feet_state = self.rigid_body_states[:, self.feet_indices, :]
-
+        self.foot_positions = self.rigid_body_states.view(
+            self.num_envs, self.num_bodies, 13
+        )[:, self.feet_indices, 0:3]
+        self.last_foot_positions = torch.zeros_like(self.foot_positions)
+        self.foot_heights = torch.zeros(self.num_envs, len(self.feet_indices), dtype=torch.float, device=self.device)
+        self.foot_velocities = torch.zeros_like(self.foot_positions)
+        self.foot_velocities_f = torch.zeros_like(self.foot_positions)
+        self.foot_relative_velocities = torch.zeros_like(self.foot_velocities)
+        self.foot_quat = torch.zeros(self.num_envs, len(self.feet_indices), 4, dtype=torch.float, device=self.device)
+        self.foot_ang_vel = torch.zeros_like(self.foot_positions)
+        self.base_position = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device)
+        self.last_base_position = torch.zeros_like(self.base_position)
         self.contact_forces = gymtorch.wrap_tensor(net_contact_forces).view(self.num_envs, -1,
                                                                             3)  # shape: num_envs, num_bodies, xyz axis
 
@@ -1145,8 +1156,99 @@ class PointFoot:
         heights = torch.min(heights, heights3)
         return heights
 
+    def _get_foot_heights(self):
+        """Samples heights of the terrain at foot positions.
+        Copied from base_task.py for foot height calculation.
+        """
+        if self.cfg.terrain.mesh_type == "plane":
+            return torch.zeros(
+                self.num_envs,
+                len(self.feet_indices),
+                device=self.device,
+                requires_grad=False,
+            )
+        elif self.cfg.terrain.mesh_type == "none":
+            raise NameError("Can't measure height with terrain mesh type 'none'")
+
+        points = self.foot_positions[:, :, :2] + self.terrain.cfg.border_size
+        points = (points / self.terrain.cfg.horizontal_scale).long()
+        px = points[:, :, 0].view(-1)
+        py = points[:, :, 1].view(-1)
+        px = torch.clip(px, 0, self.height_samples.shape[0] - 2)
+        py = torch.clip(py, 0, self.height_samples.shape[1] - 2)
+
+        heights1 = self.height_samples[px, py]
+        heights2 = self.height_samples[px + 1, py]
+        heights3 = self.height_samples[px, py + 1]
+        heights = torch.min(heights1, heights2)
+        heights = torch.min(heights, heights3)
+        heights = heights.view(self.num_envs, -1) * self.terrain.cfg.vertical_scale
+
+        return heights
+
     def _compute_feet_states(self):
+        # Update feet state
         self.feet_state = self.rigid_body_states[:, self.feet_indices, :]
+        
+        # Compute foot quaternions and positions
+        self.foot_quat = self.rigid_body_states.view(self.num_envs, self.num_bodies, 13)[
+            :, self.feet_indices, 3:7
+        ]
+        self.foot_positions = self.rigid_body_states.view(
+            self.num_envs, self.num_bodies, 13
+        )[:, self.feet_indices, 0:3]
+        
+        # Compute foot velocities
+        self.foot_velocities = (
+            self.foot_positions - self.last_foot_positions
+        ) / self.dt
+
+        # Compute foot angular velocities in local frame
+        self.foot_ang_vel = self.rigid_body_states.view(
+            self.num_envs, self.num_bodies, 13
+        )[:, self.feet_indices, 10:13]
+        for i in range(len(self.feet_indices)):
+            self.foot_ang_vel[:, i] = quat_rotate_inverse(
+                self.foot_quat[:, i], self.foot_ang_vel[:, i]
+            )
+            self.foot_velocities_f[:, i] = quat_rotate_inverse(
+                self.foot_quat[:, i], self.foot_velocities[:, i]
+            )
+
+        # Compute base position
+        self.base_position = self.root_states[:, 0:3]
+        
+        # Compute foot relative velocities
+        foot_relative_velocities = (
+            self.foot_velocities
+            - (self.base_position - self.last_base_position)
+            .unsqueeze(1)
+            .repeat(1, len(self.feet_indices), 1)
+            / self.dt
+        )
+        for i in range(len(self.feet_indices)):
+            self.foot_relative_velocities[:, i, :] = quat_rotate_inverse(
+                self.base_quat, foot_relative_velocities[:, i, :]
+            )
+        
+        # Compute foot heights
+        if hasattr(self.cfg.asset, 'foot_radius'):
+            foot_radius = self.cfg.asset.foot_radius
+        else:
+            foot_radius = 0.0
+            
+        ground_heights = self._get_foot_heights()
+        self.foot_heights = torch.clip(
+            (
+                self.foot_positions[:, :, 2]
+                - foot_radius
+                - ground_heights), 0, 1)
+        
+        # Update last positions for next iteration
+        self.last_foot_positions = self.foot_positions.clone()
+        self.last_base_position = self.base_position.clone()
+        
+        # Original air time and contact logic
         self.last_feet_air_time = self.feet_air_time * self.first_contact + self.last_feet_air_time * ~self.first_contact
         self.feet_air_time *= ~self.contact_filt
         if self._include_feet_height_rewards:
@@ -1228,12 +1330,7 @@ class PointFoot:
     def _reward_survival(self):
         return (~self.reset_buf).float()
     # ==================== 第二类：TODO中的跟踪类Reward函数 ====================
-    def _reward_tracking_lin_vel(self):
-        # Tracking the linear velocity command
-        lin_vel_error = torch.sum(
-            torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1
-        )
-        return torch.exp(-lin_vel_error / self.cfg.rewards.tracking_sigma)
+
 
     # ------- TODO: add reward function for velocity tracking task -------
     '''
@@ -1250,19 +1347,25 @@ class PointFoot:
 
     '''
     # 1. linear velocity tracking
+    def _reward_tracking_lin_vel(self):
+        # Tracking the linear velocity command
+        lin_vel_error = torch.sum(
+            torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1
+        )
+        return torch.exp(-lin_vel_error / self.cfg.rewards.tracking_sigma)
     def _reward_tracking_ang_vel(self):
         # Tracking of angular velocity commands
         ang_vel_error = torch.square(self.commands[:, 2] - self.base_ang_vel[:, 2])
         return torch.exp(-ang_vel_error / self.cfg.rewards.ang_tracking_sigma)
 
-    def _reward_tracking_base_height(self):
-        # Tracking the base height command
-        if self.commands.shape[1] > 3:  # 假设第4个命令是目标高度
-            base_height = torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
-            height_error = torch.square(self.commands[:, 3] - base_height)
-            return torch.exp(-height_error / self.cfg.rewards.tracking_sigma)
-        else:
-            return torch.zeros(self.num_envs, device=self.device)
+    # def _reward_tracking_base_height(self):
+    #     # Tracking the base height command
+    #     if self.commands.shape[1] > 3:  # 假设第4个命令是目标高度
+    #         base_height = torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
+    #         height_error = torch.square(self.commands[:, 3] - base_height)
+    #         return torch.exp(-height_error / self.cfg.rewards.tracking_sigma)
+    #     else:
+    #         return torch.zeros(self.num_envs, device=self.device)
 
     def _reward_tracking_contacts_shaped_force(self):
         """基于接触力的步态奖励"""
@@ -1287,18 +1390,18 @@ class PointFoot:
             )
         return reward / len(self.feet_indices)
 
-    # def _reward_tracking_contacts_shaped_height(self):
-    #     # Reward foot height based on gait phase
-    #     desired_contact = self.desired_contact_states
-    #     swing_height = self.gaits[:, 3]
+    def _reward_tracking_contacts_shaped_height(self):
+        # Reward foot height based on gait phase
+        desired_contact = self.desired_contact_states
+        swing_height = self.gaits[:, 3]
         
-    #     reward = 0
-    #     for i in range(len(self.feet_indices)):
-    #         # Swinging foot should be higher
-    #         target_height = (1 - desired_contact[:, i]) * swing_height
-    #         height_error = torch.square(self.foot_heights[:, i] - target_height)
-    #         reward += torch.exp(-height_error / self.cfg.rewards.tracking_sigma)
-    #     return reward / len(self.feet_indices)
+        reward = 0
+        for i in range(len(self.feet_indices)):
+            # Swinging foot should be higher
+            target_height = (1 - desired_contact[:, i]) * swing_height
+            height_error = torch.square(self.foot_heights[:, i] - target_height)
+            reward += torch.exp(-height_error / self.cfg.rewards.tracking_sigma)
+        return reward / len(self.feet_indices)
 
     # ==================== 第三类：后来新加的Reward函数 ====================
     def _reward_action_smooth(self):
@@ -1315,20 +1418,20 @@ class PointFoot:
         return torch.ones(
             self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
 
-    # def _reward_feet_regulation(self):
-    #     feet_height = self.cfg.rewards.base_height_target * 0.001
-    #     reward = torch.sum(
-    #         torch.exp(-self.foot_heights / feet_height)
-    #         * torch.square(torch.norm(self.foot_velocities[:, :, :2], dim=-1)), dim=1)
-    #     return reward
+    def _reward_feet_regulation(self):
+        feet_height = self.cfg.rewards.base_height_target * 0.001
+        reward = torch.sum(
+            torch.exp(-self.foot_heights / feet_height)
+            * torch.square(torch.norm(self.foot_velocities[:, :, :2], dim=-1)), dim=1)
+        return reward
 
-    # def _reward_foot_landing_vel(self):
-    #     z_vels = self.foot_velocities[:, :, 2]
-    #     contacts = self.contact_forces[:, self.feet_indices, 2] > 0.1
-    #     about_to_land = (self.foot_heights < self.cfg.rewards.about_landing_threshold) & (~contacts) & (z_vels < 0.0)
-    #     landing_z_vels = torch.where(about_to_land, z_vels, torch.zeros_like(z_vels))
-    #     reward = torch.sum(torch.square(landing_z_vels), dim=1)
-    #     return reward
+    def _reward_foot_landing_vel(self):
+        z_vels = self.foot_velocities[:, :, 2]
+        contacts = self.contact_forces[:, self.feet_indices, 2] > 0.1
+        about_to_land = (self.foot_heights < self.cfg.rewards.about_landing_threshold) & (~contacts) & (z_vels < 0.0)
+        landing_z_vels = torch.where(about_to_land, z_vels, torch.zeros_like(z_vels))
+        reward = torch.sum(torch.square(landing_z_vels), dim=1)
+        return reward
 
     def _reward_feet_contact_number(self):
         # Reward appropriate number of feet in contact (single foot support)

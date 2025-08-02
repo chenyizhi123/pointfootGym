@@ -142,6 +142,7 @@ class PointFootRoughCfg(BaseConfig):
         max_linear_velocity = 1000.
         armature = 0.
         thickness = 0.01
+        foot_radius = 0.03  # radius of the foot sphere for height calculation
 
     class domain_rand:
         randomize_friction = True
@@ -187,7 +188,7 @@ class PointFootRoughCfg(BaseConfig):
             feet_swing = 0.0
             # tracking_contacts_shaped_height = 0.0
             feet_contact_number = 0.0
-        only_positive_rewards = False  # if true negative total rewards are clipped at zero (avoids early termination problems)
+        only_positive_rewards = True  # if true negative total rewards are clipped at zero (avoids early termination problems)
         clip_reward = 100
         clip_single_reward = 5
         tracking_sigma = 0.2  # tracking reward = exp(-error^2/sigma)
