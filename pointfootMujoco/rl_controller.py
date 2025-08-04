@@ -25,7 +25,12 @@ class PointfootController:
         # Load configuration and model file paths based on robot type
         self.config_file = f'{model_dir}/{self.robot_type}/params.yaml'
         self.model_file = f'{model_dir}/{self.robot_type}/policy/policy.onnx'
-
+        # 新增：步态控制相关初始化
+        self.gait_indices = 0.0
+        self.gaits = np.array([2.0, 0.5, 0.5, 0.05])  # [frequency, offset, duration, swing_height]
+        self.clock_inputs_sin = 0.0
+        self.clock_inputs_cos = 1.0
+        self.desired_contact_states = np.zeros(2)  # 双足机器人
         # Load configuration settings from the YAML file
         self.load_config(self.config_file)
 
@@ -80,12 +85,7 @@ class PointfootController:
         # Flag to start the controller
         self.start_controller = start_controller
         
-        # 新增：步态控制相关初始化
-        self.gait_indices = 0.0
-        self.gaits = np.array([2.0, 0.5, 0.5, 0.05])  # [frequency, offset, duration, swing_height]
-        self.clock_inputs_sin = 0.0
-        self.clock_inputs_cos = 1.0
-        self.desired_contact_states = np.zeros(2)  # 双足机器人
+
 
     # Load the configuration from a YAML file
     def load_config(self, config_file):

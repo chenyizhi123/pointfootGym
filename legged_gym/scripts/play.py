@@ -53,6 +53,18 @@ def play(args):
 
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
+    
+    # 修复：命令显示为零的问题
+    # 原因：1. 命令每5秒重新采样 2. 小命令(norm<0.2)被自动置零 3. 随机采样经常产生小命令
+    # 解决方案：禁用重采样并设置特定命令
+    env.cfg.commands.resampling_time = 1000.0  # 设置很长时间避免重采样
+    env.cfg.commands.min_norm = 0.0  # 允许小命令（不自动置零）
+    
+    # 手动设置初始命令来测试策略跟踪行为
+    env.commands[:, 0] = 0.5  # 前进速度 0.5 m/s
+    env.commands[:, 1] = 0.0  # 横向速度 0.0 m/s
+    env.commands[:, 2] = 0.0  # 偏航角速度 0.0 rad/s
+    
     obs = env.get_observations()
     # load policy
     train_cfg.runner.resume = True
@@ -77,6 +89,12 @@ def play(args):
     img_idx = 0
 
     for i in range(10*int(env.max_episode_length)):
+        # 定期更新命令确保不被重采样覆盖
+        if i % 50 == 0:  # 每50步更新一次命令（约每2.5秒@20Hz）
+            env.commands[:, 0] = 0.5  # 前进速度 0.5 m/s
+            env.commands[:, 1] = 0.0  # 横向速度 0.0 m/s  
+            env.commands[:, 2] = 0.0  # 偏航角速度 0.0 rad/s
+        
         actions = policy(obs.detach())
         obs, _, rews, dones, infos = env.step(actions.detach())
         if RECORD_FRAMES:

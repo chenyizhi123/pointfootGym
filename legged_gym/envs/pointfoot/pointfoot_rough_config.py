@@ -48,8 +48,8 @@ class PointFootRoughCfg(BaseConfig):
         num_commands = 3  # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
         resampling_time = 5.0  # time before command are changed[s]
         heading_command = False  # if true: compute ang vel command from heading error, only work on adaptive group
-        min_norm = 0.1
-        zero_command_prob = 0.2
+        min_norm = 0.05  # 降低最小命令阈值，减少命令被置零
+        zero_command_prob = 0.1  # 减少零命令概率
 
         class ranges:
             lin_vel_x = [-1.0, 1.0]  # min max [m/s]
@@ -152,8 +152,8 @@ class PointFootRoughCfg(BaseConfig):
         randomize_base_com = True
         rand_com_vec = [0.03, 0.02, 0.03]
         push_robots = True
-        push_interval_s = 7
-        max_push_vel_xy = 1.
+        push_interval_s = 5 # time between pushes [s]
+        max_push_vel_xy = 1.  
 
     class rewards:
         class scales:
@@ -161,25 +161,25 @@ class PointFootRoughCfg(BaseConfig):
             keep_balance = 1.0
 
             # tracking related rewards
-            tracking_lin_vel = 1
-            tracking_ang_vel = 0.5
+            tracking_lin_vel = 1.2 # 进一步增加线性速度跟踪权重 (原来1)
+            tracking_ang_vel = 0.8 # 增加角速度跟踪权重 (原来0.5)
 
             # regulation related rewards
-            base_height = -2
+            base_height = -1.0  # 减弱高度惩罚，允许更灵活的运动 (原来-2.0)
             lin_vel_z = -0.5
             ang_vel_xy = -0.05
-            torques = -0.00008
+            torques = -0.00002
             dof_acc = -2.5e-7
-            action_rate = -0.01
+            action_rate = -0.006
             dof_pos_limits = -2.0
-            collision = -1
-            action_smooth = -0.01
-            orientation = -10.0
+            collision = -1.2  # 减弱碰撞惩罚，允许更灵活的运动 (原来-2.5)
+            action_smooth = -0.001
+            orientation = -5  # 减弱姿态惩罚，避免过度限制运动 (原来-8.0)
             feet_distance = -100
-            # feet_regulation = -0.05
-            # foot_landing_vel = -0.15
-            tracking_contacts_shaped_force = -2
-            tracking_contacts_shaped_vel = -2
+            feet_regulation = -0.00001 # 减弱脚部调节奖励 (原来-0.05)
+            foot_landing_vel = -0.1 # 减弱脚部着陆速度奖励 (原来-0.15)
+            tracking_contacts_shaped_force = -0.2
+            tracking_contacts_shaped_vel = -0.2
             
             # additional reward functions (set to 0 if not needed)
             feet_air_time = 0.0
@@ -191,7 +191,7 @@ class PointFootRoughCfg(BaseConfig):
         only_positive_rewards = True  # if true negative total rewards are clipped at zero (avoids early termination problems)
         clip_reward = 100
         clip_single_reward = 5
-        tracking_sigma = 0.2  # tracking reward = exp(-error^2/sigma)
+        tracking_sigma = 0.10  # 进一步减小sigma提高跟踪精度要求 (原来0.2)，tracking reward = exp(-error^2/sigma)
         ang_tracking_sigma = 0.25  # tracking reward = exp(-error^2/sigma)
         height_tracking_sigma = 0.01
         soft_dof_pos_limit = 0.95  # percentage of urdf limits, values above this limit are penalized

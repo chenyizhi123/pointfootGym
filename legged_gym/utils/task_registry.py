@@ -29,6 +29,7 @@
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
 import os
+import shutil
 from datetime import datetime
 from typing import Tuple
 import torch
@@ -61,6 +62,30 @@ class TaskRegistry():
         # copy seed
         env_cfg.seed = train_cfg.seed
         return env_cfg, train_cfg
+
+    def _save_config_to_log_dir(self, log_dir, task_name):
+        """简单地复制配置文件到日志目录"""
+        if log_dir is None:
+            return
+        
+        try:
+            # 确保日志目录存在
+            os.makedirs(log_dir, exist_ok=True)
+            
+            # 直接复制原始配置文件到日志目录
+            if 'pointfoot' in task_name.lower():
+                config_module_path = os.path.join(LEGGED_GYM_ROOT_DIR, 'legged_gym', 'envs', 'pointfoot', 'pointfoot_rough_config.py')
+                if os.path.exists(config_module_path):
+                    # 保存配置文件到日志目录
+                    config_backup_file = os.path.join(log_dir, 'pointfoot_rough_config.py')
+                    shutil.copy2(config_module_path, config_backup_file)
+                    
+                    print(f"✅ 配置文件已保存到: {config_backup_file}")
+                else:
+                    print(f"⚠️  找不到配置文件: {config_module_path}")
+            
+        except Exception as e:
+            print(f"⚠️  保存配置文件时出错: {e}")
     
     def make_env(self, name, args=None, env_cfg=None) -> Tuple[VecEnv, PointFootRoughCfg]:
         """ Creates an environment either from a registered namme or from the provided config file.
@@ -145,6 +170,11 @@ class TaskRegistry():
         
         train_cfg_dict = class_to_dict(train_cfg)
         runner = OnPolicyRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
+        
+        # 保存配置文件到训练日志目录
+        if name is not None and log_dir is not None:
+            self._save_config_to_log_dir(log_dir, name)
+        
         #save resume path before creating a new log_dir
         resume = train_cfg.runner.resume
         if resume:
