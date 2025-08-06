@@ -39,23 +39,25 @@ class PointFootRoughCfg(BaseConfig):
 
     class commands:
         curriculum = True
-        smooth_max_lin_vel_x = 2.0
-        smooth_max_lin_vel_y = 1.0
-        non_smooth_max_lin_vel_x = 1.0
-        non_smooth_max_lin_vel_y = 1.0
-        max_ang_vel_yaw = 3.0
-        curriculum_threshold = 0.75
-        num_commands = 3  # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
-        resampling_time = 5.0  # time before command are changed[s]
-        heading_command = False  # if true: compute ang vel command from heading error, only work on adaptive group
-        min_norm = 0.05  # 降低最小命令阈值，减少命令被置零
-        zero_command_prob = 0.1  # 减少零命令概率
+        # 位置跟踪任务参数
+        num_commands = 2  # target_x, target_y (只有2D位置，简化任务)
+        resampling_time = 8.0  # 目标更换间隔 [s] - 比速度任务更长，给足时间到达
+        target_timeout = 6.0  # 到达目标的时间限制 [s] - 必须在此时间内到达
+        
+        # 目标生成参数
+        min_target_distance = 1.0  # 最小目标距离 [m] - 避免目标太近
+        max_target_distance = 4.0  # 最大目标距离 [m] - 避免目标太远
+        reach_tolerance = 0.1  # 到达判定容忍度 [m] - 在此距离内算到达
+        hold_time_threshold = 1.0  # 保持目标位置的时间阈值 [s] - 达到后换新目标
+        
+        # Curriculum学习参数
+        curriculum_threshold = 0.75  # 成功率阈值，超过后增加难度
+        max_curriculum_distance = 6.0  # curriculum最大目标距离
 
         class ranges:
-            lin_vel_x = [-1.0, 1.0]  # min max [m/s]
-            lin_vel_y = [-0.6, 0.6]  # min max [m/s]
-            ang_vel_yaw = [-1, 1]  # min max [rad/s]
-            heading = [-3.14159, 3.14159]
+            # 相对目标位置范围（相对于当前位置的偏移）
+            target_x = [-3.0, 3.0]  # 目标x偏移范围 [m]
+            target_y = [-3.0, 3.0]  # 目标y偏移范围 [m]
 
     class gait:
         num_gait_params = 4
@@ -160,9 +162,12 @@ class PointFootRoughCfg(BaseConfig):
             # termination related rewards
             keep_balance = 1.0
 
-            # tracking related rewards
-            tracking_lin_vel = 1.5 # 进一步增加线性速度跟踪权重 (原来1)
-            tracking_ang_vel = 1.0 # 增加角速度跟踪权重 (原来0.5)
+            # 位置跟踪任务奖励 (替换速度跟踪)
+            position_tracking = 2.0    # 位置跟踪奖励 - 基于到目标距离
+            target_reached = 5.0       # 到达目标奖励 - 成功到达时的大奖励  
+            time_efficiency = 1.0      # 时间效率奖励 - 快速到达的额外奖励
+            timeout_penalty = -2.0     # 超时惩罚 - 未能及时到达的惩罚
+            task_completion = 10.0     # 任务完成奖励 - 保持目标位置足够久的大奖励
 
             # regulation related rewards
             base_height = -1.0  # 减弱高度惩罚，允许更灵活的运动 (原来-2.0)
@@ -191,8 +196,9 @@ class PointFootRoughCfg(BaseConfig):
         only_positive_rewards = True  # if true negative total rewards are clipped at zero (avoids early termination problems)
         clip_reward = 100
         clip_single_reward = 5
-        tracking_sigma = 0.15  # 进一步减小sigma提高跟踪精度要求 (原来0.2)，tracking reward = exp(-error^2/sigma)
-        ang_tracking_sigma = 0.25  # tracking reward = exp(-error^2/sigma)
+        # 位置跟踪奖励参数
+        position_tracking_sigma = 1.0  # 位置跟踪exp奖励的sigma，控制距离容忍度
+        efficiency_time_scale = 3.0    # 时间效率奖励的时间尺度 [s]
         height_tracking_sigma = 0.05
         soft_dof_pos_limit = 0.95  # percentage of urdf limits, values above this limit are penalized
         soft_dof_vel_limit = 1.0
