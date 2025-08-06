@@ -39,6 +39,11 @@ from export_policy_as_onnx import *
 import numpy as np
 import torch
 
+# 修改说明：
+# 1. 从速度跟踪改为位置跟踪：命令从3D速度(vx,vy,vyaw)改为2D位置(target_x,target_y)
+# 2. 添加了位置跟踪相关的状态监控：距离、剩余时间、到达状态等
+# 3. 实现了动态目标设置：到达当前目标后自动生成新的随机目标
+
 
 def play(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
@@ -54,16 +59,20 @@ def play(args):
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
     
-    # 修复：命令显示为零的问题
-    # 原因：1. 命令每5秒重新采样 2. 小命令(norm<0.2)被自动置零 3. 随机采样经常产生小命令
-    # 解决方案：禁用重采样并设置特定命令
+    # 位置跟踪测试设置
+    # 禁用自动重采样，手动设置固定的位置目标来测试策略
     env.cfg.commands.resampling_time = 1000.0  # 设置很长时间避免重采样
-    env.cfg.commands.min_norm = 0.0  # 允许小命令（不自动置零）
     
-    # 手动设置初始命令来测试策略跟踪行为
-    env.commands[:, 0] = 0.5  # 前进速度 0.5 m/s
-    env.commands[:, 1] = 0.0  # 横向速度 0.0 m/s
-    env.commands[:, 2] = 0.0  # 偏航角速度 0.0 rad/s
+    # 手动设置位置目标来测试策略的位置跟踪能力
+    # 设置一个中等距离的目标位置
+    current_pos = env.root_states[:, :2].clone()  # 获取当前位置
+    env.commands[:, 0] = current_pos[:, 0] + 2.0  # 目标X位置：当前位置 + 2米
+    env.commands[:, 1] = current_pos[:, 1] + 1.0  # 目标Y位置：当前位置 + 1米
+    
+    # 重置时间相关状态
+    env.target_time_remaining[:] = env.cfg.commands.target_timeout
+    env.is_target_reached[:] = False
+    env.target_reached_time[:] = 0.0
     
     obs = env.get_observations()
     # load policy
@@ -89,11 +98,25 @@ def play(args):
     img_idx = 0
 
     for i in range(10*int(env.max_episode_length)):
-        # 定期更新命令确保不被重采样覆盖
-        if i % 50 == 0:  # 每50步更新一次命令（约每2.5秒@20Hz）
-            env.commands[:, 0] = 0.5  # 前进速度 0.5 m/s
-            env.commands[:, 1] = 0.0  # 横向速度 0.0 m/s  
-            env.commands[:, 2] = 0.0  # 偏航角速度 0.0 rad/s
+        # 定期更新位置命令确保不被重采样覆盖，并在到达目标后设置新目标
+        if i % 100 == 0:  # 每100步检查一次（约每5秒@20Hz）
+            current_pos = env.root_states[:, :2]
+            target_pos = env.commands[:, :2]
+            distance_to_target = torch.norm(target_pos - current_pos, dim=1)
+            
+            # 如果到达目标（距离<0.2米），设置新的随机目标
+            reached_mask = distance_to_target < 0.2
+            if torch.any(reached_mask):
+                # 为到达目标的环境设置新的随机目标
+                n_reached = reached_mask.sum().item()
+                new_targets_x = current_pos[reached_mask, 0] + torch.rand(n_reached, device=env.device) * 4.0 - 2.0  # [-2, 2]米偏移
+                new_targets_y = current_pos[reached_mask, 1] + torch.rand(n_reached, device=env.device) * 4.0 - 2.0  # [-2, 2]米偏移
+                
+                env.commands[reached_mask, 0] = new_targets_x
+                env.commands[reached_mask, 1] = new_targets_y
+                env.target_time_remaining[reached_mask] = env.cfg.commands.target_timeout
+                env.is_target_reached[reached_mask] = False
+                env.target_reached_time[reached_mask] = 0.0
         
         actions = policy(obs.detach())
         obs, _, rews, dones, infos = env.step(actions.detach())
@@ -107,15 +130,29 @@ def play(args):
             env.set_camera(camera_position, camera_position + camera_direction)
 
         if i < stop_state_log:
+            # 计算当前位置和目标的相关信息
+            current_pos_x = env.root_states[robot_index, 0].item()
+            current_pos_y = env.root_states[robot_index, 1].item()
+            target_pos_x = env.commands[robot_index, 0].item()
+            target_pos_y = env.commands[robot_index, 1].item()
+            distance_to_target = np.sqrt((target_pos_x - current_pos_x)**2 + (target_pos_y - current_pos_y)**2)
+            
             logger.log_states(
                 {
                     'dof_pos_target': actions[robot_index, joint_index].item() * env.cfg.control.action_scale,
                     'dof_pos': env.dof_pos[robot_index, joint_index].item(),
                     'dof_vel': env.dof_vel[robot_index, joint_index].item(),
                     'dof_torque': env.torques[robot_index, joint_index].item(),
-                    'command_x': env.commands[robot_index, 0].item(),
-                    'command_y': env.commands[robot_index, 1].item(),
-                    'command_yaw': env.commands[robot_index, 2].item(),
+                    # 位置跟踪相关状态
+                    'target_pos_x': target_pos_x,
+                    'target_pos_y': target_pos_y,
+                    'current_pos_x': current_pos_x,
+                    'current_pos_y': current_pos_y,
+                    'distance_to_target': distance_to_target,
+                    'time_remaining': env.target_time_remaining[robot_index].item(),
+                    'is_target_reached': env.is_target_reached[robot_index].item(),
+                    'target_reached_time': env.target_reached_time[robot_index].item(),
+                    # 机器人运动状态
                     'base_vel_x': env.base_lin_vel[robot_index, 0].item(),
                     'base_vel_y': env.base_lin_vel[robot_index, 1].item(),
                     'base_vel_z': env.base_lin_vel[robot_index, 2].item(),
