@@ -126,7 +126,7 @@ class TaskRegistry():
                             headless=args.headless)
         return env, env_cfg
 
-    def make_alg_runner(self, env, name=None, args=None, train_cfg=None, log_root="default") -> Tuple[OnPolicyRunner, PointFootRoughCfgPPO]:
+    def make_alg_runner(self, env, name=None, args=None, train_cfg=None, log_root="default", save_config=False) -> Tuple[OnPolicyRunner, PointFootRoughCfgPPO]:
         """ Creates the training algorithm  either from a registered namme or from the provided config file.
 
         Args:
@@ -136,6 +136,7 @@ class TaskRegistry():
             train_cfg (Dict, optional): Training config file. If None 'name' will be used to get the config file. Defaults to None.
             log_root (str, optional): Logging directory for Tensorboard. Set to 'None' to avoid logging (at test time for example). 
                                       Logs will be saved in <log_root>/<date_time>_<run_name>. Defaults to "default"=<path_to_LEGGED_GYM>/logs/<experiment_name>.
+            save_config (bool, optional): Whether to save config files to log directory. Set to True for training, False for evaluation. Defaults to False.
 
         Raises:
             ValueError: Error if neither 'name' or 'train_cfg' are provided
@@ -171,8 +172,8 @@ class TaskRegistry():
         train_cfg_dict = class_to_dict(train_cfg)
         runner = OnPolicyRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
         
-        # 保存配置文件到训练日志目录
-        if name is not None and log_dir is not None:
+        # 只在训练时保存配置文件到训练日志目录
+        if save_config and name is not None and log_dir is not None:
             self._save_config_to_log_dir(log_dir, name)
         
         #save resume path before creating a new log_dir

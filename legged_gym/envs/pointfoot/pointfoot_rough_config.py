@@ -161,8 +161,8 @@ class PointFootRoughCfg(BaseConfig):
             keep_balance = 1.0
 
             # tracking related rewards
-            tracking_lin_vel = 1.2 # 进一步增加线性速度跟踪权重 (原来1)
-            tracking_ang_vel = 0.8 # 增加角速度跟踪权重 (原来0.5)
+            tracking_lin_vel = 1.5 # 进一步增加线性速度跟踪权重 (原来1)
+            tracking_ang_vel = 1.0 # 增加角速度跟踪权重 (原来0.5)
 
             # regulation related rewards
             base_height = -1.0  # 减弱高度惩罚，允许更灵活的运动 (原来-2.0)
@@ -172,12 +172,12 @@ class PointFootRoughCfg(BaseConfig):
             dof_acc = -2.5e-7
             action_rate = -0.006
             dof_pos_limits = -2.0
-            collision = -1.2  # 减弱碰撞惩罚，允许更灵活的运动 (原来-2.5)
+            collision = -1  # 减弱碰撞惩罚，允许更灵活的运动 (原来-2.5)
             action_smooth = -0.001
             orientation = -5  # 减弱姿态惩罚，避免过度限制运动 (原来-8.0)
             feet_distance = -100
             feet_regulation = -0.00001 # 减弱脚部调节奖励 (原来-0.05)
-            foot_landing_vel = -0.1 # 减弱脚部着陆速度奖励 (原来-0.15)
+            # foot_landing_vel = -0.1 # 减弱脚部着陆速度奖励 (原来-0.15)
             tracking_contacts_shaped_force = -0.2
             tracking_contacts_shaped_vel = -0.2
             
@@ -191,9 +191,9 @@ class PointFootRoughCfg(BaseConfig):
         only_positive_rewards = True  # if true negative total rewards are clipped at zero (avoids early termination problems)
         clip_reward = 100
         clip_single_reward = 5
-        tracking_sigma = 0.10  # 进一步减小sigma提高跟踪精度要求 (原来0.2)，tracking reward = exp(-error^2/sigma)
+        tracking_sigma = 0.15  # 进一步减小sigma提高跟踪精度要求 (原来0.2)，tracking reward = exp(-error^2/sigma)
         ang_tracking_sigma = 0.25  # tracking reward = exp(-error^2/sigma)
-        height_tracking_sigma = 0.01
+        height_tracking_sigma = 0.05
         soft_dof_pos_limit = 0.95  # percentage of urdf limits, values above this limit are penalized
         soft_dof_vel_limit = 1.0
         soft_torque_limit = 0.8
@@ -281,10 +281,10 @@ class PointFootRoughCfgPPO(BaseConfig):
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
-        entropy_coef = 0.01
+        entropy_coef = 0.005
         num_learning_epochs = 5
         num_mini_batches = 4  # mini batch size = num_envs*nsteps / nminibatches
-        learning_rate = 1.e-3  # 5.e-4
+        learning_rate = 5.e-5  # 5.e-4
         schedule = 'adaptive'  # could be adaptive, fixed
         gamma = 0.99
         lam = 0.95
