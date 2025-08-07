@@ -228,9 +228,6 @@ class PointFoot:
         # update curriculum
         if self.cfg.terrain.curriculum:
             self._update_terrain_curriculum(env_ids)
-        # avoid updating command curriculum at each step since the maximum command is common to all envs
-        if self.cfg.commands.curriculum and (self.common_step_counter % self.max_episode_length == 0):
-            self.update_command_curriculum(env_ids)
         # 更新位置跟踪等级
         if self.cfg.commands.position_curriculum:
             self._update_position_curriculum(env_ids)
@@ -251,11 +248,7 @@ class PointFoot:
         # log additional curriculum info
         if self.cfg.terrain.curriculum:
             self.extras["episode"]["terrain_level"] = torch.mean(self.terrain_levels.float())
-        if self.cfg.commands.curriculum:
-            self.extras["episode"]["max_target_range"] = max(
-                abs(self.command_ranges["target_x"][0]), 
-                abs(self.command_ranges["target_x"][1])
-            )
+
         # log position tracking curriculum info
         if hasattr(self, 'position_levels') and self.cfg.commands.position_curriculum:
             self.extras["episode"]["position_level"] = torch.mean(self.position_levels.float())
@@ -568,29 +561,38 @@ class PointFoot:
                 level = self.position_levels[env_id].item()
                 level_range = self.position_level_ranges[level]  # [x_min, x_max, y_min, y_max]
                 
-                # 在该等级的范围内随机采样
-                self.commands[env_id, 0] = torch_rand_float(
+                # 在该等级的范围内随机采样相对偏移
+                relative_x = torch_rand_float(
                     level_range[0], level_range[1], (1, 1), device=self.device
-                ).squeeze()  # target_x
-                
-                self.commands[env_id, 1] = torch_rand_float(
+                ).squeeze()
+                relative_y = torch_rand_float(
                     level_range[2], level_range[3], (1, 1), device=self.device
-                ).squeeze()  # target_y
+                ).squeeze()
+                
+                # 转换为绝对坐标：起始位置 + 相对偏移
+                env_origin = self.env_origins[env_id, :2]
+                self.commands[env_id, 0] = env_origin[0] + relative_x  # target_x (绝对坐标)
+                self.commands[env_id, 1] = env_origin[1] + relative_y  # target_y (绝对坐标)
         else:
-            # 简单直接的位置指令生成：在[-5, 5]范围内随机采样
-            self.commands[env_ids, 0] = torch_rand_float(
+            # 简单直接的位置指令生成：在[-5, 5]范围内随机采样相对偏移
+            relative_x = torch_rand_float(
                 self.command_ranges["target_x"][0],
                 self.command_ranges["target_x"][1], 
                 (len(env_ids), 1),
                 device=self.device
-            ).squeeze(1)  # target_x
+            ).squeeze(1)
             
-            self.commands[env_ids, 1] = torch_rand_float(
+            relative_y = torch_rand_float(
                 self.command_ranges["target_y"][0],
                 self.command_ranges["target_y"][1], 
                 (len(env_ids), 1),
                 device=self.device
-            ).squeeze(1)  # target_y
+            ).squeeze(1)
+            
+            # 转换为绝对坐标：起始位置 + 相对偏移
+            env_origins_2d = self.env_origins[env_ids, :2]
+            self.commands[env_ids, 0] = env_origins_2d[:, 0] + relative_x  # target_x (绝对坐标)
+            self.commands[env_ids, 1] = env_origins_2d[:, 1] + relative_y  # target_y (绝对坐标)
 
     def _compute_torques(self, actions):
         """ Compute torques from actions.
@@ -708,58 +710,7 @@ class PointFoot:
                                                               0))  # (the minumum level is zero)
         self.env_origins[env_ids] = self.terrain_origins[self.terrain_levels[env_ids], self.terrain_types[env_ids]]
 
-    def update_command_curriculum(self, env_ids):
-        """ 位置跟踪的课程学习：根据成功率调整目标距离范围
 
-        Args:
-            env_ids (List[int]): ids of environments being reset
-        """
-        if len(env_ids) == 0:
-            return
-            
-        # 计算位置跟踪的成功率（到达目标的比例）
-        distances = torch.norm(self.commands[env_ids, :2] - self.root_states[env_ids, :2], dim=1)
-        success_rate = (distances < self.cfg.rewards.arrival_threshold).float().mean()
-        
-        # 如果成功率高于阈值，增加目标范围的难度
-        if success_rate > 0.8:  # 80%成功率
-            # 扩大目标位置的采样范围
-            current_range_x = self.command_ranges["target_x"]
-            current_range_y = self.command_ranges["target_y"]
-            
-            # 逐步扩大范围，最大到±10米
-            new_range_x = [
-                max(current_range_x[0] - 0.5, -10.0),  # 扩大负方向
-                min(current_range_x[1] + 0.5, 10.0)    # 扩大正方向
-            ]
-            new_range_y = [
-                max(current_range_y[0] - 0.5, -10.0),
-                min(current_range_y[1] + 0.5, 10.0)
-            ]
-            
-            self.command_ranges["target_x"] = new_range_x
-            self.command_ranges["target_y"] = new_range_y
-            
-            print(f"课程学习: 成功率{success_rate:.2f}, 扩大目标范围到 X:{new_range_x}, Y:{new_range_y}")
-        
-        elif success_rate < 0.4:  # 成功率太低，适当缩小范围
-            current_range_x = self.command_ranges["target_x"]
-            current_range_y = self.command_ranges["target_y"]
-            
-            # 适当缩小范围，最小保持±2米
-            new_range_x = [
-                min(current_range_x[0] + 0.2, -2.0),
-                max(current_range_x[1] - 0.2, 2.0)
-            ]
-            new_range_y = [
-                min(current_range_y[0] + 0.2, -2.0),
-                max(current_range_y[1] - 0.2, 2.0)
-            ]
-            
-            self.command_ranges["target_x"] = new_range_x
-            self.command_ranges["target_y"] = new_range_y
-            
-            print(f"课程学习: 成功率{success_rate:.2f}过低, 缩小目标范围到 X:{new_range_x}, Y:{new_range_y}")
 
     def _update_position_curriculum(self, env_ids):
         """ 更新位置跟踪等级：根据到达成功率和距离表现调整每个机器人的位置跟踪等级
@@ -808,8 +759,9 @@ class PointFoot:
         target_pos = self.commands[:, :2]      # [num_envs, 2] (target_x, target_y)
         distances_to_target = torch.norm(target_pos - current_pos, dim=1)
         
-        # 更新最大到达距离（从起始点到当前点的距离）
-        current_distances_from_start = torch.norm(current_pos, dim=1)
+        # 更新最大到达距离（从环境起始点到当前点的距离）
+        env_origins_2d = self.env_origins[:, :2]  # 环境起始点的x,y坐标
+        current_distances_from_start = torch.norm(current_pos - env_origins_2d, dim=1)
         self.episode_distances = torch.max(self.episode_distances, current_distances_from_start)
         
         # 检查是否到达目标
