@@ -54,16 +54,14 @@ def play(args):
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
     
-    # 修复：命令显示为零的问题
-    # 原因：1. 命令每5秒重新采样 2. 小命令(norm<0.2)被自动置零 3. 随机采样经常产生小命令
-    # 解决方案：禁用重采样并设置特定命令
+    # 位置跟踪任务设置
+    # 禁用重采样以便手动控制目标位置
     env.cfg.commands.resampling_time = 1000.0  # 设置很长时间避免重采样
-    env.cfg.commands.min_norm = 0.0  # 允许小命令（不自动置零）
+    env.cfg.commands.min_norm = 0.0  # 允许小目标（不自动置零）
     
-    # 手动设置初始命令来测试策略跟踪行为
-    env.commands[:, 0] = 0.5  # 前进速度 0.5 m/s
-    env.commands[:, 1] = 0.0  # 横向速度 0.0 m/s
-    env.commands[:, 2] = 0.0  # 偏航角速度 0.0 rad/s
+    # 手动设置初始位置偏移来测试策略
+    env.commands[:, 0] = 3.0  # X方向偏移 3.0 m (相对于当前位置)
+    env.commands[:, 1] = 2.0  # Y方向偏移 2.0 m (相对于当前位置)
     
     obs = env.get_observations()
     # load policy
@@ -89,14 +87,32 @@ def play(args):
     img_idx = 0
 
     for i in range(10*int(env.max_episode_length)):
-        # 定期更新命令确保不被重采样覆盖
-        if i % 50 == 0:  # 每50步更新一次命令（约每2.5秒@20Hz）
-            env.commands[:, 0] = 0.5  # 前进速度 0.5 m/s
-            env.commands[:, 1] = 0.0  # 横向速度 0.0 m/s  
-            env.commands[:, 2] = 0.0  # 偏航角速度 0.0 rad/s
+        # 动态改变位置偏移来测试跟踪能力
+        if i % 400 == 0:  # 每400步（约20秒@20Hz）改变偏移指令
+            if i == 0:
+                env.commands[:, 0] = 3.0  # 第一个偏移：向前右移动
+                env.commands[:, 1] = 2.0
+            elif i == 400:
+                env.commands[:, 0] = -2.0  # 第二个偏移：向后左移动  
+                env.commands[:, 1] = -3.0
+            elif i == 800:
+                env.commands[:, 0] = 1.0   # 第三个偏移：小幅右前移动
+                env.commands[:, 1] = 1.0
+            elif i == 1200:
+                env.commands[:, 0] = -1.0   # 第四个偏移：小幅左后移动
+                env.commands[:, 1] = -1.0
         
         actions = policy(obs.detach())
         obs, _, rews, dones, infos = env.step(actions.detach())
+        
+        # 每5秒打印一次位置跟踪状态
+        if i % 100 == 0:
+            current_offset = env.base_position[robot_index, :2] - env.command_base_position[robot_index, :2]
+            target_offset = env.commands[robot_index, :2]
+            distance = torch.norm(target_offset - current_offset).item()
+            print(f"Step {i}: Target_offset=({target_offset[0].item():.2f}, {target_offset[1].item():.2f}), "
+                  f"Current_offset=({current_offset[0].item():.2f}, {current_offset[1].item():.2f}), "
+                  f"Distance={distance:.2f}m")
         if RECORD_FRAMES:
             if i % 2:
                 filename = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, 'exported', 'frames', f"{img_idx}.png")
@@ -107,15 +123,26 @@ def play(args):
             env.set_camera(camera_position, camera_position + camera_direction)
 
         if i < stop_state_log:
+            # 计算位置跟踪相关的指标
+            current_offset = env.base_position[robot_index, :2] - env.command_base_position[robot_index, :2]
+            target_offset = env.commands[robot_index, :2]
+            distance_to_target = torch.norm(target_offset - current_offset).item()
+            
             logger.log_states(
                 {
                     'dof_pos_target': actions[robot_index, joint_index].item() * env.cfg.control.action_scale,
                     'dof_pos': env.dof_pos[robot_index, joint_index].item(),
                     'dof_vel': env.dof_vel[robot_index, joint_index].item(),
                     'dof_torque': env.torques[robot_index, joint_index].item(),
-                    'command_x': env.commands[robot_index, 0].item(),
-                    'command_y': env.commands[robot_index, 1].item(),
-                    'command_yaw': env.commands[robot_index, 2].item(),
+                    # 位置跟踪相关
+                    'target_offset_x': target_offset[0].item(),
+                    'target_offset_y': target_offset[1].item(),
+                    'current_offset_x': current_offset[0].item(),
+                    'current_offset_y': current_offset[1].item(),
+                    'distance_to_target': distance_to_target,
+                    'base_pos_abs_x': env.base_position[robot_index, 0].item(),
+                    'base_pos_abs_y': env.base_position[robot_index, 1].item(),
+                    # 速度信息
                     'base_vel_x': env.base_lin_vel[robot_index, 0].item(),
                     'base_vel_y': env.base_lin_vel[robot_index, 1].item(),
                     'base_vel_z': env.base_lin_vel[robot_index, 2].item(),

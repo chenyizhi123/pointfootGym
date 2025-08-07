@@ -3,8 +3,8 @@ from legged_gym.envs.base.base_config import BaseConfig
 class PointFootRoughCfg(BaseConfig):
     class env:
         num_envs = 8192
-        num_propriceptive_obs = 33  # Updated: 3(gravity) + 3(ang_vel) + 3(commands) + 6(dof_pos) + 6(dof_vel) + 6(actions) + 1(clock_sin) + 1(clock_cos) + 4(gaits) = 33
-        num_privileged_obs = 148  # if not None a priviledge_obs_buf will be returned by step() (critic obs for assymetric training). None is returned otherwise
+        num_propriceptive_obs = 32  # Updated: 3(gravity) + 3(ang_vel) + 2(commands) + 6(dof_pos) + 6(dof_vel) + 6(actions) + 1(clock_sin) + 1(clock_cos) + 4(gaits) = 32
+        num_privileged_obs = 153  # 包含所有proprioceptive obs (32) + height measurements (11x11=121) = 153
         num_actions = 6
         env_spacing = 3.  # not used with heightfields/trimeshes
         send_timeouts = True  # send time out information to the algorithm
@@ -39,23 +39,17 @@ class PointFootRoughCfg(BaseConfig):
 
     class commands:
         curriculum = True
-        smooth_max_lin_vel_x = 2.0
-        smooth_max_lin_vel_y = 1.0
-        non_smooth_max_lin_vel_x = 1.0
-        non_smooth_max_lin_vel_y = 1.0
-        max_ang_vel_yaw = 3.0
+        max_curriculum = 6.0  # 最大位置范围
         curriculum_threshold = 0.75
-        num_commands = 3  # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
-        resampling_time = 5.0  # time before command are changed[s]
-        heading_command = False  # if true: compute ang vel command from heading error, only work on adaptive group
-        min_norm = 0.05  # 降低最小命令阈值，减少命令被置零
-        zero_command_prob = 0.1  # 减少零命令概率
+        num_commands = 2  # 改为2: target_pos_x, target_pos_y (相对于起始点的偏移)
+        resampling_time = 8.0  # 位置目标重采样时间8秒
+        heading_command = False
+        min_norm = 0.5  # 最小目标距离0.5m，避免目标过近
+        zero_command_prob = 0.05  # 减少零命令概率
 
         class ranges:
-            lin_vel_x = [-1.0, 1.0]  # min max [m/s]
-            lin_vel_y = [-0.6, 0.6]  # min max [m/s]
-            ang_vel_yaw = [-1, 1]  # min max [rad/s]
-            heading = [-3.14159, 3.14159]
+            target_pos_x = [-6.0, 6.0]  # 相对于当前位置的X偏移范围 [m]
+            target_pos_y = [-6.0, 6.0]  # 相对于当前位置的Y偏移范围 [m]
 
     class gait:
         num_gait_params = 4
@@ -161,8 +155,9 @@ class PointFootRoughCfg(BaseConfig):
             keep_balance = 1.0
 
             # tracking related rewards
-            tracking_lin_vel = 1.5 # 进一步增加线性速度跟踪权重 (原来1)
-            tracking_ang_vel = 1.0 # 增加角速度跟踪权重 (原来0.5)
+            tracking_target_pos = 2.0  # 位置跟踪主要奖励
+            reach_target = 1.0         # 到达目标奖励
+            movement_efficiency = -0.1 # 移动效率奖励
 
             # regulation related rewards
             base_height = -1.0  # 减弱高度惩罚，允许更灵活的运动 (原来-2.0)
@@ -191,9 +186,9 @@ class PointFootRoughCfg(BaseConfig):
         only_positive_rewards = True  # if true negative total rewards are clipped at zero (avoids early termination problems)
         clip_reward = 100
         clip_single_reward = 5
-        tracking_sigma = 0.15  # 进一步减小sigma提高跟踪精度要求 (原来0.2)，tracking reward = exp(-error^2/sigma)
-        ang_tracking_sigma = 0.25  # tracking reward = exp(-error^2/sigma)
-        height_tracking_sigma = 0.05
+        pos_tracking_sigma = 1.0  # 位置跟踪误差容忍度，1.0m的标准差
+        reach_threshold = 0.5     # 到达目标的距离阈值[m]
+        efficiency_threshold = 1.0 # 移动效率判断的距离阈值[m]
         soft_dof_pos_limit = 0.95  # percentage of urdf limits, values above this limit are penalized
         soft_dof_vel_limit = 1.0
         soft_torque_limit = 0.8
