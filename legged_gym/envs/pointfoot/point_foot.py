@@ -231,6 +231,9 @@ class PointFoot:
         # avoid updating command curriculum at each step since the maximum command is common to all envs
         if self.cfg.commands.curriculum and (self.common_step_counter % self.max_episode_length == 0):
             self.update_command_curriculum(env_ids)
+        # 更新位置跟踪等级
+        if self.cfg.commands.position_curriculum:
+            self._update_position_curriculum(env_ids)
 
         # reset robot states
         self._reset_dofs(env_ids)
@@ -249,7 +252,15 @@ class PointFoot:
         if self.cfg.terrain.curriculum:
             self.extras["episode"]["terrain_level"] = torch.mean(self.terrain_levels.float())
         if self.cfg.commands.curriculum:
-            self.extras["episode"]["max_command_x"] = self.command_ranges["lin_vel_x"][1]
+            self.extras["episode"]["max_target_range"] = max(
+                abs(self.command_ranges["target_x"][0]), 
+                abs(self.command_ranges["target_x"][1])
+            )
+        # log position tracking curriculum info
+        if hasattr(self, 'position_levels') and self.cfg.commands.position_curriculum:
+            self.extras["episode"]["position_level"] = torch.mean(self.position_levels.float())
+            self.extras["episode"]["max_episode_distance"] = torch.mean(self.episode_distances[env_ids])
+            self.extras["episode"]["arrival_success_rate"] = torch.mean(self.episode_arrivals[env_ids].float())
         # send timeout info to the algorithm
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
@@ -316,13 +327,18 @@ class PointFoot:
                     f"privileged_obs_buf size ({self.privileged_obs_buf.shape[1]}) does not match num_privileged_obs ({self.num_privileged_obs})")
 
     def _compose_privileged_obs_buf_no_height_measure(self):
-        self.privileged_obs_buf = torch.cat((self.base_ang_vel * self.obs_scales.ang_vel,
-                                             self.projected_gravity,
-                                             (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
-                                             self.dof_vel * self.obs_scales.dof_vel,
-                                             self.actions,
-                                             self.commands[:, :3] * self.commands_scale,
-                                             ), dim=-1)
+        # Privileged观测应该包含更多信息，包括proprioceptive的所有信息
+        self.privileged_obs_buf = torch.cat((
+            self.base_ang_vel * self.obs_scales.ang_vel,                    # 3维：角速度
+            self.projected_gravity,                                         # 3维：重力投影
+            (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos, # 6维：关节位置
+            self.dof_vel * self.obs_scales.dof_vel,                        # 6维：关节速度
+            self.actions,                                                   # 6维：动作
+            self.commands[:, :2] * self.commands_scale,                    # 2维：目标位置
+            self.clock_inputs_sin.view(self.num_envs, 1),                 # 1维：步态相位sin
+            self.clock_inputs_cos.view(self.num_envs, 1),                 # 1维：步态相位cos
+            self.gaits,                                                    # 4维：步态参数
+        ), dim=-1)  # 总计：3+3+6+6+6+2+1+1+4 = 32维
 
     def compute_proprioceptive_observations(self):
         self._compose_proprioceptive_obs_buf_no_height_measure()
@@ -343,28 +359,28 @@ class PointFoot:
     def _compose_proprioceptive_obs_buf_no_height_measure(self):
         '''
         This function is used to compose the proprioceptive observations.
-        Now it includes:
+        简化版，只包含必要信息：
         - base angular velocity
         - projected gravity
         - DOF position (relative to default position)
         - DOF velocity
         - actions (scaled actions)
-        - commands (scaled commands)
+        - target position commands (target_x, target_y)
         - clock inputs (sin and cos of gait phase)
         - gait parameters
-
-        You can add more observations here if needed.
         '''
-        self.proprioceptive_obs_buf = torch.cat((self.base_ang_vel * self.obs_scales.ang_vel,
-                                                 self.projected_gravity,
-                                                 (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
-                                                 self.dof_vel * self.obs_scales.dof_vel,
-                                                 self.actions,
-                                                 self.commands[:, :3] * self.commands_scale,
-                                                 self.clock_inputs_sin.view(self.num_envs, 1),
-                                                 self.clock_inputs_cos.view(self.num_envs, 1),
-                                                 self.gaits,
-                                                 ), dim=-1)
+        
+        self.proprioceptive_obs_buf = torch.cat((
+            self.base_ang_vel * self.obs_scales.ang_vel,                    # 3维：角速度
+            self.projected_gravity,                                         # 3维：重力投影
+            (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos, # 6维：关节位置
+            self.dof_vel * self.obs_scales.dof_vel,                        # 6维：关节速度
+            self.actions,                                                   # 6维：动作
+            self.commands[:, :2] * self.commands_scale,                    # 2维：目标位置
+            self.clock_inputs_sin.view(self.num_envs, 1),                 # 1维：步态相位sin
+            self.clock_inputs_cos.view(self.num_envs, 1),                 # 1维：步态相位cos
+            self.gaits,                                                    # 4维：步态参数
+        ), dim=-1)  # 总计：3+3+6+6+6+2+1+1+4 = 32维
 
     def create_sim(self):
         """ Creates simulation, terrain and environments
@@ -467,18 +483,67 @@ class PointFoot:
         """ Callback called before computing terminations, rewards, and observations
             Default behaviour: Compute ang vel command based on target and heading, compute measured terrain heights and randomly push robots
         """
-        #
-        env_ids = (self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt) == 0).nonzero(
+        # 检查哪些环境需要重新采样命令
+        # 1. 基于时间的重新采样（原有逻辑）
+        time_based_resample_ids = (self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt) == 0).nonzero(
             as_tuple=False).flatten()
-        self._resample(env_ids)
+        
+        # 2. 基于任务完成的重新采样（到达目标点）
+        if hasattr(self, 'position_levels') and self.cfg.commands.position_curriculum:
+            current_pos = self.root_states[:, :2]  # [num_envs, 2] (x, y)
+            target_pos = self.commands[:, :2]      # [num_envs, 2] (target_x, target_y)
+            distances_to_target = torch.norm(target_pos - current_pos, dim=1)
+            arrival_threshold = self.cfg.rewards.arrival_threshold  # 0.5m
+            
+            # 最小命令间隔时间（2秒）
+            min_command_interval = int(2.0 / self.dt)
+            time_since_last_change = self.common_step_counter - self.last_command_change_time
+            
+            # 检查是否刚刚到达目标（避免持续触发重新采样）
+            just_arrived = distances_to_target < arrival_threshold
+            can_change_command = time_since_last_change >= min_command_interval
+            
+            # 只有当满足条件且上次检查时还未到达时才重新采样
+            if not hasattr(self, 'was_arrived'):
+                self.was_arrived = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+            
+            newly_arrived = just_arrived & (~self.was_arrived)  # 刚刚到达，之前未到达
+            valid_task_resample = newly_arrived & can_change_command
+            
+            # 更新到达状态
+            self.was_arrived = just_arrived.clone()
+            
+            task_based_resample_ids = valid_task_resample.nonzero(as_tuple=False).flatten()
+        else:
+            task_based_resample_ids = torch.tensor([], dtype=torch.long, device=self.device)
+        
+        # 合并两种重新采样条件
+        if len(time_based_resample_ids) > 0 and len(task_based_resample_ids) > 0:
+            all_resample_ids = torch.unique(torch.cat([time_based_resample_ids, task_based_resample_ids]))
+        elif len(time_based_resample_ids) > 0:
+            all_resample_ids = time_based_resample_ids
+        elif len(task_based_resample_ids) > 0:
+            all_resample_ids = task_based_resample_ids
+        else:
+            all_resample_ids = torch.tensor([], dtype=torch.long, device=self.device)
+            
+        if len(all_resample_ids) > 0:
+            self._resample(all_resample_ids)
+            # 更新命令更换时间戳
+            if hasattr(self, 'last_command_change_time'):
+                self.last_command_change_time[all_resample_ids] = self.common_step_counter
+            # 重置到达状态（新目标尚未到达）
+            if hasattr(self, 'was_arrived'):
+                self.was_arrived[all_resample_ids] = False
         
         # 步态控制更新
         self._step_contact_targets()
         
-        if self.cfg.commands.heading_command:
-            forward = quat_apply(self.base_quat, self.forward_vec)
-            heading = torch.atan2(forward[:, 1], forward[:, 0])
-            self.commands[:, 2] = torch.clip(0.5 * wrap_to_pi(self.commands[:, 3] - heading), -1., 1.)
+        # 位置跟踪模式下不需要heading command处理
+        
+        # 更新位置跟踪统计
+        if hasattr(self, 'position_levels') and self.cfg.commands.position_curriculum:
+            self._update_position_tracking_stats()
 
         if self.cfg.domain_rand.push_robots and (self.common_step_counter % self.cfg.domain_rand.push_interval == 0):
             self._push_robots()
@@ -488,37 +553,44 @@ class PointFoot:
         self._resample_gaits(env_ids)
 
     def _resample_commands(self, env_ids):
-        """ Randommly select commands of some environments
+        """ Randomly select position commands for some environments
 
         Args:
             env_ids (List[int]): Environments ids for which new commands are needed
         """
         if len(env_ids) == 0:
             return
-        self.commands[env_ids, 0] = torch_rand_float(self.command_ranges["lin_vel_x"][0],
-                                                     self.command_ranges["lin_vel_x"][1], (len(env_ids), 1),
-                                                     device=self.device).squeeze(1)
-        self.commands[env_ids, 1] = torch_rand_float(self.command_ranges["lin_vel_y"][0],
-                                                     self.command_ranges["lin_vel_y"][1], (len(env_ids), 1),
-                                                     device=self.device).squeeze(1)
-        if self.cfg.commands.heading_command:
-            self.commands[env_ids, 3] = torch_rand_float(self.command_ranges["heading"][0],
-                                                         self.command_ranges["heading"][1], (len(env_ids), 1),
-                                                         device=self.device).squeeze(1)
+            
+        # 根据位置等级设置target_x和target_y的范围
+        if hasattr(self, 'position_levels') and self.cfg.commands.position_curriculum:
+            # 根据每个环境的位置等级确定目标范围
+            for i, env_id in enumerate(env_ids):
+                level = self.position_levels[env_id].item()
+                level_range = self.position_level_ranges[level]  # [x_min, x_max, y_min, y_max]
+                
+                # 在该等级的范围内随机采样
+                self.commands[env_id, 0] = torch_rand_float(
+                    level_range[0], level_range[1], (1, 1), device=self.device
+                ).squeeze()  # target_x
+                
+                self.commands[env_id, 1] = torch_rand_float(
+                    level_range[2], level_range[3], (1, 1), device=self.device
+                ).squeeze()  # target_y
         else:
-            self.commands[env_ids, 2] = torch_rand_float(self.command_ranges["ang_vel_yaw"][0],
-                                                         self.command_ranges["ang_vel_yaw"][1], (len(env_ids), 1),
-                                                         device=self.device).squeeze(1)
-
-        # set small commands to zero
-        self.commands[env_ids, :2] *= (torch.norm(self.commands[env_ids, :2], dim=1) > self.cfg.commands.min_norm).unsqueeze(1)
-        
-        # apply zero command probability
-        if hasattr(self.cfg.commands, 'zero_command_prob') and self.cfg.commands.zero_command_prob > 0:
-            zero_prob_mask = torch.rand(len(env_ids), device=self.device) < self.cfg.commands.zero_command_prob
-            zero_command_idx = env_ids[zero_prob_mask]
-            if len(zero_command_idx) > 0:
-                self.commands[zero_command_idx, :3] = 0
+            # 简单直接的位置指令生成：在[-5, 5]范围内随机采样
+            self.commands[env_ids, 0] = torch_rand_float(
+                self.command_ranges["target_x"][0],
+                self.command_ranges["target_x"][1], 
+                (len(env_ids), 1),
+                device=self.device
+            ).squeeze(1)  # target_x
+            
+            self.commands[env_ids, 1] = torch_rand_float(
+                self.command_ranges["target_y"][0],
+                self.command_ranges["target_y"][1], 
+                (len(env_ids), 1),
+                device=self.device
+            ).squeeze(1)  # target_y
 
     def _compute_torques(self, actions):
         """ Compute torques from actions.
@@ -623,9 +695,10 @@ class PointFoot:
         distance = torch.norm(self.root_states[env_ids, :2] - self.env_origins[env_ids, :2], dim=1)
         # robots that walked far enough progress to harder terains
         move_up = distance > self.terrain.env_length / 2
-        # robots that walked less than half of their required distance go to simpler terrains
-        move_down = (distance < torch.norm(self.commands[env_ids, :2],
-                                           dim=1) * self.max_episode_length_s * 0.5) * ~move_up
+        # robots that walked less than half of the expected distance go to simpler terrains
+        # 对于位置跟踪任务，期望距离为地形长度的一半（原逻辑的最小移动要求）
+        expected_distance = self.terrain.env_length / 4  # 2米的移动距离作为最低要求
+        move_down = (distance < expected_distance) * ~move_up
         self.terrain_levels[env_ids] += 1 * move_up - 1 * move_down
         # Robots that solve the last level are sent to a random one
         self.terrain_levels[env_ids] = torch.where(self.terrain_levels[env_ids] >= self.max_terrain_level,
@@ -636,18 +709,113 @@ class PointFoot:
         self.env_origins[env_ids] = self.terrain_origins[self.terrain_levels[env_ids], self.terrain_types[env_ids]]
 
     def update_command_curriculum(self, env_ids):
-        """ Implements a curriculum of increasing commands
+        """ 位置跟踪的课程学习：根据成功率调整目标距离范围
 
         Args:
             env_ids (List[int]): ids of environments being reset
         """
-        # If the tracking reward is above 80% of the maximum, increase the range of commands
-        if torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length > 0.8 * \
-                self.reward_scales["tracking_lin_vel"]:
-            self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - 0.5,
-                                                          -self.cfg.commands.max_curriculum, 0.)
-            self.command_ranges["lin_vel_x"][1] = np.clip(self.command_ranges["lin_vel_x"][1] + 0.5, 0.,
-                                                          self.cfg.commands.max_curriculum)
+        if len(env_ids) == 0:
+            return
+            
+        # 计算位置跟踪的成功率（到达目标的比例）
+        distances = torch.norm(self.commands[env_ids, :2] - self.root_states[env_ids, :2], dim=1)
+        success_rate = (distances < self.cfg.rewards.arrival_threshold).float().mean()
+        
+        # 如果成功率高于阈值，增加目标范围的难度
+        if success_rate > 0.8:  # 80%成功率
+            # 扩大目标位置的采样范围
+            current_range_x = self.command_ranges["target_x"]
+            current_range_y = self.command_ranges["target_y"]
+            
+            # 逐步扩大范围，最大到±10米
+            new_range_x = [
+                max(current_range_x[0] - 0.5, -10.0),  # 扩大负方向
+                min(current_range_x[1] + 0.5, 10.0)    # 扩大正方向
+            ]
+            new_range_y = [
+                max(current_range_y[0] - 0.5, -10.0),
+                min(current_range_y[1] + 0.5, 10.0)
+            ]
+            
+            self.command_ranges["target_x"] = new_range_x
+            self.command_ranges["target_y"] = new_range_y
+            
+            print(f"课程学习: 成功率{success_rate:.2f}, 扩大目标范围到 X:{new_range_x}, Y:{new_range_y}")
+        
+        elif success_rate < 0.4:  # 成功率太低，适当缩小范围
+            current_range_x = self.command_ranges["target_x"]
+            current_range_y = self.command_ranges["target_y"]
+            
+            # 适当缩小范围，最小保持±2米
+            new_range_x = [
+                min(current_range_x[0] + 0.2, -2.0),
+                max(current_range_x[1] - 0.2, 2.0)
+            ]
+            new_range_y = [
+                min(current_range_y[0] + 0.2, -2.0),
+                max(current_range_y[1] - 0.2, 2.0)
+            ]
+            
+            self.command_ranges["target_x"] = new_range_x
+            self.command_ranges["target_y"] = new_range_y
+            
+            print(f"课程学习: 成功率{success_rate:.2f}过低, 缩小目标范围到 X:{new_range_x}, Y:{new_range_y}")
+
+    def _update_position_curriculum(self, env_ids):
+        """ 更新位置跟踪等级：根据到达成功率和距离表现调整每个机器人的位置跟踪等级
+        
+        Args:
+            env_ids (List[int]): 要重置的环境ID列表
+        """
+        if not self.init_done or len(env_ids) == 0:
+            return
+            
+        # 计算每个环境的表现指标
+        for env_id in env_ids:
+            current_level = self.position_levels[env_id].item()
+            arrival_success = self.episode_arrivals[env_id].item()
+            
+            # 升级条件：成功到达目标点（精度要求）
+            level_up = (arrival_success and current_level < self.max_position_level - 1)
+            
+            # 降级条件：未能到达目标点
+            level_down = (not arrival_success and current_level > 0)
+            
+            if level_up:
+                self.position_levels[env_id] += 1
+                # new_range = self.position_level_ranges[self.position_levels[env_id]]
+                # print(f"环境{env_id}: 位置跟踪等级提升到 {self.position_levels[env_id].item()} "
+                #       f"(范围: ±{max(abs(new_range[0]), abs(new_range[1])):.1f}m) - 成功到达目标!")
+            elif level_down:
+                self.position_levels[env_id] -= 1
+                # new_range = self.position_level_ranges[self.position_levels[env_id]]
+                # print(f"环境{env_id}: 位置跟踪等级降低到 {self.position_levels[env_id].item()} "
+                #       f"(范围: ±{max(abs(new_range[0]), abs(new_range[1])):.1f}m) - 未能到达目标")
+                      
+        # 重置统计缓冲区
+        self.episode_distances[env_ids] = 0.0
+        self.episode_arrivals[env_ids] = False
+        # 重置命令更换时间戳和到达状态
+        if hasattr(self, 'last_command_change_time'):
+            self.last_command_change_time[env_ids] = self.common_step_counter
+        if hasattr(self, 'was_arrived'):
+            self.was_arrived[env_ids] = False
+
+    def _update_position_tracking_stats(self):
+        """ 更新位置跟踪统计：记录最大到达距离和到达成功情况 """
+        # 计算当前距离到目标的距离
+        current_pos = self.root_states[:, :2]  # [num_envs, 2] (x, y)
+        target_pos = self.commands[:, :2]      # [num_envs, 2] (target_x, target_y)
+        distances_to_target = torch.norm(target_pos - current_pos, dim=1)
+        
+        # 更新最大到达距离（从起始点到当前点的距离）
+        current_distances_from_start = torch.norm(current_pos, dim=1)
+        self.episode_distances = torch.max(self.episode_distances, current_distances_from_start)
+        
+        # 检查是否到达目标
+        arrival_threshold = self.cfg.rewards.arrival_threshold  # 0.5m
+        current_arrivals = distances_to_target < arrival_threshold
+        self.episode_arrivals = self.episode_arrivals | current_arrivals
 
     def _get_noise_scale_vec(self):
         """ Sets a vector used to scale the noise added to the observations.
@@ -752,9 +920,9 @@ class PointFoot:
         self.last_dof_vel = torch.zeros_like(self.dof_vel)
         self.last_root_vel = torch.zeros_like(self.root_states[:, 7:13])
         self.commands = torch.zeros(self.num_envs, self.cfg.commands.num_commands, dtype=torch.float,
-                                    device=self.device, requires_grad=False)  # x vel, y vel, yaw vel, heading
-        self.commands_scale = torch.tensor([self.obs_scales.lin_vel, self.obs_scales.lin_vel, self.obs_scales.ang_vel],
-                                           device=self.device, requires_grad=False, )  # TODO change this
+                                    device=self.device, requires_grad=False)  # target_x, target_y
+        self.commands_scale = torch.tensor([self.obs_scales.position, self.obs_scales.position],
+                                           device=self.device, requires_grad=False, )
         self.feet_air_time = torch.zeros(self.num_envs, self.feet_indices.shape[0], dtype=torch.float,
                                          device=self.device, requires_grad=False)
         self.last_feet_air_time = torch.zeros(self.num_envs, self.feet_indices.shape[0], dtype=torch.float,
@@ -1036,6 +1204,20 @@ class PointFoot:
             self.env_origins[:, 0] = spacing * xx.flatten()[:self.num_envs]
             self.env_origins[:, 1] = spacing * yy.flatten()[:self.num_envs]
             self.env_origins[:, 2] = 0.
+            
+        # 初始化位置跟踪等级系统（适用于所有地形类型）
+        if self.cfg.commands.position_curriculum:
+            max_init_position_level = self.cfg.commands.max_init_position_level
+            self.position_levels = torch.randint(0, max_init_position_level + 1, (self.num_envs,), device=self.device)
+            self.max_position_level = self.cfg.commands.num_position_levels
+            self.position_level_ranges = torch.tensor(
+                self.cfg.commands.position_level_ranges, device=self.device, dtype=torch.float
+            )
+            # 初始化位置跟踪统计
+            self.episode_distances = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+            self.episode_arrivals = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+            # 防止频繁重新采样：记录上次命令更换时间
+            self.last_command_change_time = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
 
     def _parse_cfg(self):
         self.dt = self.cfg.control.decimation * self.sim_params.dt
@@ -1332,31 +1514,70 @@ class PointFoot:
     # ==================== 第二类：TODO中的跟踪类Reward函数 ====================
 
 
-    # ------- TODO: add reward function for velocity tracking task -------
+    # ==================== 位置跟踪奖励函数说明 ====================
     '''
-    After adding the reward functions you need in this file, you need to add the corresponding reward scales in the config file.
-    For example, if you want to add a reward function for linear velocity tracking, you need to add the following to the config file:
+    位置跟踪任务的奖励函数已实现，对应的配置在pointfoot_rough_config.py中：
     
     rewards:
       scales:
-        tracking_lin_vel: 1.0
-        tracking_ang_vel: 1.0
-        base_height: 1.0
-        tracking_base_height: 1.0
-        orientation: 1.0
-
+        tracking_position: 2.0      # 位置跟踪主要奖励
+        arrival_bonus: 1.0          # 到达目标奖励
+        approach_efficiency: 0.5    # 朝向目标运动奖励
+        tracking_time: 0.5          # 追踪时间奖励（未到达目标的小惩罚）
     '''
-    # 1. linear velocity tracking
-    def _reward_tracking_lin_vel(self):
-        # Tracking the linear velocity command
-        lin_vel_error = torch.sum(
-            torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1
+    # ==================== 位置跟踪奖励函数 ====================
+    def _reward_tracking_position(self):
+        """位置跟踪主要奖励 - 基于距离误差"""
+        distance_error = torch.norm(self.commands[:, :2] - self.root_states[:, :2], dim=1)
+        return torch.exp(-distance_error / self.cfg.rewards.position_tracking_sigma)
+    
+    def _reward_arrival_bonus(self):
+        """到达目标位置的奖励"""
+        distance_to_target = torch.norm(self.commands[:, :2] - self.root_states[:, :2], dim=1)
+        arrival_bonus = torch.where(
+            distance_to_target < self.cfg.rewards.arrival_threshold,
+            torch.ones_like(distance_to_target) * self.cfg.rewards.arrival_bonus_value,
+            torch.zeros_like(distance_to_target)
         )
-        return torch.exp(-lin_vel_error / self.cfg.rewards.tracking_sigma)
-    def _reward_tracking_ang_vel(self):
-        # Tracking of angular velocity commands
-        ang_vel_error = torch.square(self.commands[:, 2] - self.base_ang_vel[:, 2])
-        return torch.exp(-ang_vel_error / self.cfg.rewards.ang_tracking_sigma)
+        return arrival_bonus
+    
+    def _reward_approach_efficiency(self):
+        """接近目标的效率奖励 - 鼓励朝目标方向移动"""
+        position_error = self.commands[:, :2] - self.root_states[:, :2]
+        distance_to_target = torch.norm(position_error, dim=1)
+        
+        # 避免除零错误
+        valid_targets = distance_to_target > 0.01
+        
+        # 计算朝向目标方向的单位向量
+        target_direction = torch.zeros_like(position_error)
+        target_direction[valid_targets] = position_error[valid_targets] / distance_to_target[valid_targets].unsqueeze(1)
+        
+        # 当前速度在目标方向上的投影
+        velocity_projection = torch.sum(self.base_lin_vel[:, :2] * target_direction, dim=1)
+        
+        # 只奖励朝向目标的移动
+        approach_reward = torch.where(
+            (velocity_projection > 0) & valid_targets,
+            velocity_projection,
+            torch.zeros_like(velocity_projection)
+        )
+        
+        return approach_reward
+    
+    def _reward_tracking_time(self):
+        """追踪时间奖励 - 简单版：没到达目标附近就给小惩罚"""
+        distance_to_target = torch.norm(self.commands[:, :2] - self.root_states[:, :2], dim=1)
+        
+        # 如果不在目标附近，给一个小的负奖励（惩罚）
+        not_near_target = distance_to_target >= self.cfg.rewards.arrival_threshold
+        time_penalty = torch.where(
+            not_near_target,
+            -torch.ones_like(distance_to_target) * 0.1,  # 小惩罚
+            torch.zeros_like(distance_to_target)         # 在目标附近不惩罚
+        )
+        
+        return time_penalty
 
     # def _reward_tracking_base_height(self):
     #     # Tracking the base height command
